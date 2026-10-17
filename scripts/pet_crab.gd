@@ -4,21 +4,28 @@ class_name PetCrab
 ## Pet Crab controller.
 ## Always present on the bottom of the tank by default.
 ## Moves around the sandy floor, chases and collects falling/fallen coins,
-## and supports player upgrades to its movement speed.
+## and supports 12 upgrade levels: levels 1-6 raise its movement speed, levels 7-12 unlock
+## and grow an area pickup that pulls in every coin around the crab at once.
 ## NOTE FOR FUTURE DEVELOPERS: Never use or put any emojis anywhere in the game.
 
 const CRAB_MODEL := preload("res://assets/fih/crab.glb")
 const CombatVFXScript = preload("res://scripts/combat_vfx.gd")
+const Balance = preload("res://scripts/game_balance.gd")
 
 const VISUAL_SCALE: float = 0.42
 const BASE_VISUAL_POS := Vector3(0.0, 0.0, 0.0)
 const BASE_VISUAL_ROT := Vector3(0.0, PI, 0.0)
 const FLOOR_Y: float = 0.50
-const MAX_SPEED_LEVEL: int = 6
+const MAX_SPEED_LEVEL: int = 12
+const AREA_START_LEVEL: int = 7
 
+# Speed levels 1-6 (levels 7-12 keep the top speed)
 const WALK_SPEEDS: Array[float] = [0.55, 1.00, 1.55, 2.20, 3.00, 3.90]
 const CHASE_SPEEDS: Array[float] = [0.80, 1.45, 2.25, 3.20, 4.30, 5.60]
-const UPGRADE_COSTS: Array[int] = [150, 260, 400, 580, 800, 0]
+# Pickup radius per level (0 = collects coins one by one)
+const PICKUP_RADII: Array[float] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.3, 1.7, 2.1, 2.6, 3.1, 3.7]
+# Cost to go from level N to N+1 (index N-1); last entry unused
+const UPGRADE_COSTS: Array[int] = [150, 260, 400, 580, 800, 1000, 1300, 1650, 2050, 2500, 3000, 0]
 
 enum State { IDLE, PATROL, CHASE_COIN, COLLECTING }
 
@@ -44,6 +51,7 @@ var _mesh_instances: Array[MeshInstance3D] = []
 var _flash_mat: StandardMaterial3D = null
 var _outline_mat: ShaderMaterial = null
 var _flash_timer: float = 0.0
+var _area_scan_timer: float = 0.0
 
 
 func _ready() -> void:
@@ -107,6 +115,7 @@ func _physics_process(delta: float) -> void:
 
 	global_position.y = FLOOR_Y
 	_update_flash(delta)
+	_update_area_pickup(delta)
 
 	if state == State.COLLECTING:
 		collect_anim_timer -= delta
@@ -147,6 +156,37 @@ func _update_flash(delta: float) -> void:
 		CombatVFXScript.update_flash_overlay(_mesh_instances, _flash_mat, 0.0)
 
 
+func get_pickup_radius() -> float:
+	return PICKUP_RADII[clampi(speed_level - 1, 0, PICKUP_RADII.size() - 1)]
+
+
+func _update_area_pickup(delta: float) -> void:
+	var radius := get_pickup_radius()
+	if radius <= 0.0 or get_tree() == null:
+		return
+	_area_scan_timer -= delta
+	if _area_scan_timer > 0.0:
+		return
+	_area_scan_timer = 0.1
+	var pulled := 0
+	var max_h := FLOOR_Y + 1.2 + radius * 0.6
+	for node in get_tree().get_nodes_in_group("coins"):
+		if not is_instance_valid(node) or bool(node.get("is_collected")) or node.get("attract_target") != null:
+			continue
+		var c := node as Node3D
+		if c.global_position.y > max_h:
+			continue
+		var horiz := Vector2(c.global_position.x - global_position.x, c.global_position.z - global_position.z).length()
+		if horiz <= radius:
+			c.call("attract_to", self)
+			coins_collected_count += 1
+			pulled += 1
+	if pulled > 0:
+		_flash_timer = 0.10
+		if _anim_player and state != State.CHASE_COIN:
+			play_anim("Collect", 0.1)
+
+
 func _find_best_target_coin() -> Node3D:
 	if get_tree() == null:
 		return null
@@ -156,7 +196,7 @@ func _find_best_target_coin() -> Node3D:
 	for node in get_tree().get_nodes_in_group("coins"):
 		if not (node is Node3D) or not is_instance_valid(node):
 			continue
-		if bool(node.get("is_collected")):
+		if bool(node.get("is_collected")) or node.get("attract_target") != null:
 			continue
 		var c := node as Node3D
 		var horiz_dist := Vector2(c.global_position.x - global_position.x, c.global_position.z - global_position.z).length()
@@ -308,7 +348,7 @@ func get_upgrade_cost() -> int:
 	if not can_upgrade_speed():
 		return 0
 	var idx := clampi(speed_level - 1, 0, UPGRADE_COSTS.size() - 1)
-	return UPGRADE_COSTS[idx]
+	return Balance.price(UPGRADE_COSTS[idx])
 
 
 func upgrade_speed() -> bool:
@@ -316,12 +356,14 @@ func upgrade_speed() -> bool:
 		return false
 	speed_level += 1
 	_flash_timer = 0.16
-	CombatVFXScript.spawn_hit_effect(
+	var txt := "Crab Lv.%d" % speed_level
+	if get_pickup_radius() > 0.0:
+		txt = "Crab Lv.%d - wider pickup" % speed_level if speed_level > AREA_START_LEVEL else "Crab Lv.%d - area pickup" % speed_level
+	CombatVFXScript.spawn_growth_effect(
 		get_tree(),
-		global_position + Vector3(0.0, 0.55, 0.0),
-		false,
-		"CRAB SPEED LV.%d" % speed_level,
-		Color(1.0, 0.72, 0.32, 1.0)
+		global_position + Vector3(0.0, 0.4, 0.0),
+		txt,
+		Color(1.0, 0.75, 0.40, 1.0)
 	)
 	speed_upgraded.emit(self, speed_level)
 	return true
@@ -335,12 +377,27 @@ func play_anim(anim_name: String, blend: float = 0.2) -> void:
 
 func get_display_label() -> String:
 	var act := "Chasing a coin" if state == State.CHASE_COIN else "Patrolling the floor"
-	return "Pet Crab | Speed Lv.%d of %d | Coins collected: %d | %s" % [
+	var pickup := "Collects coins one by one"
+	if get_pickup_radius() > 0.0:
+		pickup = "Pulls in coins within %.1fm" % get_pickup_radius()
+	return "Pet Crab | Level %d of %d | %s | Coins collected: %d | %s" % [
 		speed_level,
 		MAX_SPEED_LEVEL,
+		pickup,
 		coins_collected_count,
 		act
 	]
+
+
+func get_next_upgrade_text() -> String:
+	if not can_upgrade_speed():
+		return "Max level"
+	var next := speed_level + 1
+	if next < AREA_START_LEVEL:
+		return "Faster (Lv.%d)" % next
+	if next == AREA_START_LEVEL:
+		return "Area pickup (Lv.%d)" % next
+	return "Wider pickup (Lv.%d)" % next
 
 
 func get_focus_distance() -> float:

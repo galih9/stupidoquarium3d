@@ -11,7 +11,9 @@ const MIN_DISPLAY_TIME: float = 0.95
 const TIPS: Array[String] = [
 	"Each Duckweed feeds one fish at a time. Add plants or upgrade them as your school grows.",
 	"Water Hyacinth hatches new baby fish once you have 2 adult goldfish.",
-	"Your Pet Crab collects coins on the sand. Upgrade its speed so fewer coins go to waste.",
+	"Your Pet Crab collects coins on the sand. From level 7 it pulls in every coin around it.",
+	"Bored fish drop cheaper coins. Decorations keep them happy, and pricier pieces help more.",
+	"Medium fish need Duckweed Lv.2 to eat, adults need Water Hyacinth.",
 	"Press B while it is peaceful to decorate. The wave timer pauses while you do.",
 	"Click a diving Kingfisher to hit it and knock it back. Archer Fish help a lot.",
 	"Fish near the water surface are the easiest for birds to catch.",
@@ -76,7 +78,7 @@ func _build_ui() -> void:
 	elif mode == "tutorial":
 		_title_label.text = "Starting tutorial"
 	else:
-		_title_label.text = "Filling the tank"
+		_title_label.text = "Filling the tank  -  %s" % str(Engine.get_meta("difficulty", "medium")).capitalize()
 	_title_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_title_label.add_theme_font_size_override("font_size", 22)
 	_title_label.add_theme_color_override("font_color", UI.TEXT)

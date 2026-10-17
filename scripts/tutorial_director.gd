@@ -91,7 +91,7 @@ func _build_steps() -> void:
 		},
 		{
 			"title": "Upgrade your plants",
-			"body": "Upgraded plants feed more fish at the same time. At the Water Hyacinth level they even hatch new baby fish once you have 2 adult goldfish.\n\nUpgrade a plant, or press 3.",
+			"body": "Plants decide how big your fish can grow: Duckweed Lv.1 only feeds baby fish, Lv.2 also feeds medium fish, and Water Hyacinth feeds adults too. Upgrades also feed more fish at once.\n\nUpgrade a plant, or press 3.",
 			"goal": "Upgrade a plant",
 			"event": "upgrade_plant",
 			"count": 1,
@@ -124,17 +124,17 @@ func _build_steps() -> void:
 			"enter": "_enter_waves",
 		},
 		{
-			"title": "Make it yours",
-			"body": "While it is peaceful you can decorate. The timer pauses while you move plants and place rocks, corals and seaweed on the floor.\n\nPress B (or Decorate in the shop) to open it, then press Done to close it.",
-			"goal": "Open and close Decorate",
-			"event": "decor_off",
+			"title": "Keep your fish happy",
+			"body": "Fish start out bored. Bored too long, they drop cheaper coins (bored babies drop none). Decorations make them happy, and stressed fish hide next to them to calm down. Pricier pieces help more, and bigger ones cover more floor tiles.\n\nPress B, pick Tank floor and buy any decoration.",
+			"goal": "Place a decoration",
+			"event": "buy_decor",
 			"count": 1,
 			"enter": "_enter_decorate",
 			"highlight": "decorate",
 		},
 		{
 			"title": "You are ready",
-			"body": "Keep your fish fed, collect coins, grow your defense and survive as many waves as you can.\n\nYou can look up any creature in the Encyclopedia from the main menu or the pause menu.",
+			"body": "Keep your fish fed and happy, collect coins, grow your defense and survive as many waves as you can. Press Done (or B) to close Decorate.\n\nYou can look up any creature in the Encyclopedia from the main menu or the pause menu.",
 			"goal": "",
 			"event": "",
 			"count": 0,
@@ -358,6 +358,7 @@ func _enter_waves() -> void:
 
 func _enter_decorate() -> void:
 	main.call("set_shop_locked", "decorate", false)
+	main.call("ensure_coins", 80)
 
 
 func _enter_done() -> void:

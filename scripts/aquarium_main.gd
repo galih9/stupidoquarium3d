@@ -43,8 +43,9 @@ const PREFERRED_GRID_CELLS: Array[Vector2i] = [
 	Vector2i(0, 0), Vector2i(5, 0), Vector2i(0, 3), Vector2i(5, 3),
 ]
 
-const COST_BABY_FISH: int = Balance.COST_BABY_FISH
-const COST_DUCKWEED: int = Balance.COST_DUCKWEED
+# Prices depend on the chosen difficulty, so they are set in _ready()
+var COST_BABY_FISH: int = Balance.COST_BABY_FISH
+var COST_DUCKWEED: int = Balance.COST_DUCKWEED
 
 const SHOP_IDS: Array[String] = ["fish", "plant", "upgrade", "archer", "crab", "decorate"]
 const SHOP_KEYS := {
@@ -55,7 +56,7 @@ const SHOP_KEYS := {
 enum WavePhase { PEACEFUL, CAREFUL, ATTACK }
 
 ## Emitted for tutorial objectives: coin_click, select, fish_fed, buy_fish, buy_plant,
-## upgrade_plant, buy_archer, upgrade_crab, bird_killed, decor_on, decor_off.
+## upgrade_plant, buy_archer, upgrade_crab, bird_killed, decor_on, decor_off, buy_decor.
 signal tutorial_event(event_name: String, data: Variant)
 
 var game_mode: String = "endless"
@@ -85,6 +86,10 @@ var _tutorial_training_wave: bool = false
 var _tutorial_director: Node = null
 var _game_over_check_timer: float = 0.0
 var _pulse_time: float = 0.0
+var _comfort_timer: float = 0.0
+var tank_comfort_total: int = 0
+var tank_comfort_ratio: float = 0.0
+var _toast_cooldowns: Dictionary = {}
 
 @onready var fish_container: Node3D = $FishContainer
 @onready var props_container: Node3D = $Tank/Decorations
@@ -104,6 +109,7 @@ var _coins_value: Label = null
 var _fish_value: Label = null
 var _fish_hungry: Label = null
 var _defense_value: Label = null
+var _comfort_value: Label = null
 var _controls_hint: PanelContainer = null
 var _hints_visible: bool = true
 var _hints_timer: float = 45.0
@@ -125,7 +131,7 @@ var _shop_cards: Dictionary = {}
 var _decor_panel: PanelContainer = null
 var _surface_tab_btn: Button = null
 var _floor_tab_btn: Button = null
-var _surface_decor_box: HBoxContainer = null
+var _surface_decor_box: VBoxContainer = null
 var _floor_decor_grid: GridContainer = null
 var _decor_buy_plant_btn: Button = null
 var _decor_upg_plant_btn: Button = null
@@ -153,6 +159,9 @@ func _ready() -> void:
 		game_mode = str(Engine.get_meta("game_mode"))
 	is_tutorial = (game_mode == "tutorial")
 	coins = Balance.STARTING_COINS
+	COST_BABY_FISH = Balance.price(Balance.COST_BABY_FISH)
+	COST_DUCKWEED = Balance.price(Balance.COST_DUCKWEED)
+	SwimmingFishScript.tank_comfort_ratio = 0.0
 
 	_duckweed_container = Node3D.new()
 	_duckweed_container.name = "DuckweedContainer"
@@ -206,7 +215,7 @@ func _ready() -> void:
 		if _controls_hint:
 			_controls_hint.visible = false
 	else:
-		_set_event("Build up your tank. The first birds arrive in %ds." % int(phase_timer), 6.0)
+		_set_event("First birds arrive in %ds. Fish get bored without decorations - press B to decorate." % int(phase_timer), 7.0)
 
 	_update_hud()
 
@@ -219,6 +228,13 @@ func _process(delta: float) -> void:
 			_hints_visible = false
 	if recent_event_timer > 0.0:
 		recent_event_timer = maxf(0.0, recent_event_timer - delta)
+
+	_comfort_timer -= delta
+	if _comfort_timer <= 0.0:
+		_comfort_timer = 0.5
+		_update_comfort()
+	for k in _toast_cooldowns.keys():
+		_toast_cooldowns[k] = float(_toast_cooldowns[k]) - delta
 
 	if not is_game_over:
 		_update_wave_timer(delta)
@@ -375,8 +391,13 @@ func _spawn_kingfishers_if_needed() -> void:
 		_active_kingfishers.append(kf)
 
 
-func _on_kingfisher_snatched_fish(_fish: Node3D) -> void:
+func _on_kingfisher_snatched_fish(fish: Node3D) -> void:
 	_set_event("A Kingfisher caught one of your fish.")
+	# Every other fish sees it happen and gets stressed (less in a well decorated tank)
+	var pos := fish.global_position if is_instance_valid(fish) else Vector3(0.0, 4.0, 0.0)
+	for node in get_tree().get_nodes_in_group("goldfish"):
+		if node != fish and is_instance_valid(node) and not bool(node.get("is_dead")) and node.has_method("on_tank_mate_eaten"):
+			node.call("on_tank_mate_eaten", pos)
 
 
 func _on_kingfisher_killed(threat: Node3D) -> void:
@@ -498,6 +519,8 @@ func _spawn_goldfish_at(size_cat: int, world_pos: Vector3) -> Node3D:
 
 	fish.connect("coin_dropped", _on_fish_coin_dropped)
 	fish.connect("fish_died", _on_fish_died)
+	fish.connect("mood_changed", _on_fish_mood_changed)
+	fish.connect("needs_better_food", _on_fish_needs_better_food)
 	fish_container.add_child(fish)
 	return fish
 
@@ -520,25 +543,129 @@ func _spawn_archer_fish() -> Node3D:
 	return archer
 
 
-func _spawn_decoration(decor_id: String, cell: Vector2i, rot_y: float = 0.0) -> Node3D:
+func _spawn_decoration(decor_id: String, anchor: Vector2i, quarter_turns: int = 0) -> Node3D:
 	var decor: Node3D = TankDecorationScript.new()
 	decor.set("decor_id", decor_id)
-	decor.set("grid_cell", cell)
+	decor.set("grid_cell", anchor)
+	decor.set("quarter_turns", quarter_turns)
 	decor.name = "Decor_%s_%02d" % [decor_id, _decorations.size() + 1]
-	decor.position = AquariumCameraScript.grid_to_world(cell, TankDecorationScript.FLOOR_Y)
-	decor.rotation.y = rot_y
 	props_container.add_child(decor)
 	_decorations.append(decor)
+	_update_comfort()
 	return decor
 
 
-func _on_fish_coin_dropped(world_pos: Vector3, size_cat: int, _stress: int) -> void:
-	var tier := CoinDropScript.CoinTier.COPPER
-	if size_cat == SwimmingFishScript.SizeCategory.MEDIUM:
-		tier = CoinDropScript.CoinTier.SILVER
-	elif size_cat == SwimmingFishScript.SizeCategory.ADULT:
-		tier = CoinDropScript.CoinTier.GOLD
-	_spawn_coin_at(world_pos, tier)
+func _on_fish_coin_dropped(world_pos: Vector3, coin_tier: int) -> void:
+	_spawn_coin_at(world_pos, clampi(coin_tier, 0, 2))
+
+
+# =============================================================================
+# Comfort and mood
+# =============================================================================
+
+func _update_comfort() -> void:
+	var total := 0
+	for d in _decorations:
+		if is_instance_valid(d) and not d.is_queued_for_deletion():
+			total += int(d.get("comfort"))
+	tank_comfort_total = total
+	var alive := maxi(_count_alive_fish(), 1)
+	tank_comfort_ratio = float(total) / (float(alive) * Balance.comfort_per_fish())
+	SwimmingFishScript.tank_comfort_ratio = tank_comfort_ratio
+
+
+func _toast_throttled(key: String, msg: String, cooldown: float) -> void:
+	if float(_toast_cooldowns.get(key, 0.0)) > 0.0:
+		return
+	_toast_cooldowns[key] = cooldown
+	_set_event(msg, 4.5)
+
+
+func _on_fish_mood_changed(_fish: Node3D, new_mood: int, penalized: bool) -> void:
+	if new_mood == SwimmingFishScript.Mood.STRESSED:
+		_toast_throttled("stressed", "Your fish are stressed. Decorations help them hide and calm down.", 30.0)
+	elif new_mood == SwimmingFishScript.Mood.BORED and penalized:
+		_toast_throttled("bored", "Your fish are bored and drop cheaper coins. Decorate the tank to cheer them up.", 40.0)
+
+
+func _on_fish_needs_better_food(fish: Node3D) -> void:
+	if not is_instance_valid(fish):
+		return
+	var size_i := int(fish.get("size_category"))
+	var names := ["Duckweed", "Duckweed Lv.2", "Water Hyacinth"]
+	var sizes := ["baby", "medium", "adult"]
+	_toast_throttled("food_%d" % size_i, "Your %s fish need %s or better to eat. Upgrade a plant (3)." % [sizes[clampi(size_i, 0, 2)], names[clampi(size_i, 0, 2)]], 20.0)
+
+
+# =============================================================================
+# Coin collect effect: a coin flies from the tank to the coin counter
+# =============================================================================
+
+func _spawn_coin_fly(world_pos: Vector3, tier: int) -> void:
+	var cam := get_viewport().get_camera_3d()
+	if cam == null or _coins_value == null or cam.is_position_behind(world_pos):
+		_bump_coin_counter()
+		return
+	var start := cam.unproject_position(world_pos)
+	var end := _coins_value.get_global_rect().get_center()
+	var colors := [Color(0.95, 0.60, 0.32), Color(0.85, 0.90, 0.98), UI.GOLD]
+	var dot := Panel.new()
+	dot.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = colors[clampi(tier, 0, 2)]
+	sb.border_color = Color(1.0, 1.0, 1.0, 0.7)
+	sb.set_border_width_all(2)
+	sb.set_corner_radius_all(8)
+	sb.anti_aliasing = true
+	dot.add_theme_stylebox_override("panel", sb)
+	dot.size = Vector2(16.0, 16.0)
+	dot.pivot_offset = Vector2(8.0, 8.0)
+	dot.position = start - Vector2(8.0, 8.0)
+	hud_layer.add_child(dot)
+	var mid := start.lerp(end, 0.4) + Vector2(randf_range(-70.0, 70.0), -90.0)
+	var tw := create_tween()
+	tw.tween_method(func(t: float) -> void:
+		var a := start.lerp(mid, t)
+		var b := mid.lerp(end, t)
+		dot.position = a.lerp(b, t) - Vector2(8.0, 8.0)
+		dot.scale = Vector2.ONE * lerpf(1.25, 0.7, t)
+	, 0.0, 1.0, 0.6).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN)
+	tw.tween_callback(func() -> void:
+		dot.queue_free()
+		_bump_coin_counter()
+	)
+
+
+func _bump_coin_counter() -> void:
+	if _coins_value == null:
+		return
+	_coins_value.pivot_offset = _coins_value.size * 0.5
+	var tw := create_tween()
+	_coins_value.scale = Vector2(1.22, 1.22)
+	_coins_value.modulate = Color(1.35, 1.25, 1.0)
+	tw.set_parallel(true)
+	tw.tween_property(_coins_value, "scale", Vector2.ONE, 0.25).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	tw.tween_property(_coins_value, "modulate", Color.WHITE, 0.3)
+
+
+# =============================================================================
+# Layer visibility while decorating the tank floor
+# =============================================================================
+
+func _update_layer_visibility() -> void:
+	# Hide everything above the floor while decorating the bottom so the floor is easy to see
+	var show_upper := not (is_decorating_mode and decor_layer == AquariumCameraScript.DECOR_LAYER_FLOOR)
+	if _duckweed_container:
+		_duckweed_container.visible = show_upper
+	if fish_container:
+		fish_container.visible = show_upper
+	for node_path in ["Tank/WaterSurface", "Tank/Bubbles"]:
+		var n := get_node_or_null(node_path) as Node3D
+		if n:
+			n.visible = show_upper
+	for a in get_tree().get_nodes_in_group("archerfish"):
+		if a is Node3D:
+			(a as Node3D).visible = show_upper
 
 
 func _spawn_coin_at(world_pos: Vector3, tier: int) -> void:
@@ -551,8 +678,10 @@ func _spawn_coin_at(world_pos: Vector3, tier: int) -> void:
 
 func _on_coin_collected(value: int, coin: Node3D) -> void:
 	coins += value
-	if is_instance_valid(coin) and bool(coin.get("collected_by_player")):
-		tutorial_event.emit("coin_click", coin)
+	if is_instance_valid(coin):
+		_spawn_coin_fly(coin.global_position, int(coin.get("tier")))
+		if bool(coin.get("collected_by_player")):
+			tutorial_event.emit("coin_click", coin)
 
 
 func _on_fish_died(_fish: Node3D, reason: String) -> void:
@@ -691,7 +820,7 @@ func _on_upgrade_crab_speed_pressed() -> void:
 	if not is_instance_valid(_pet_crab):
 		_spawn_pet_crab()
 	if not bool(_pet_crab.call("can_upgrade_speed")):
-		_set_event("Your crab is already at top speed.")
+		_set_event("Your crab is already at max level.")
 		return
 	var cost := int(_pet_crab.call("get_upgrade_cost"))
 	if coins < cost:
@@ -699,7 +828,13 @@ func _on_upgrade_crab_speed_pressed() -> void:
 		return
 	coins -= cost
 	_pet_crab.call("upgrade_speed")
-	_set_event("Crab speed is now Lv.%d." % int(_pet_crab.get("speed_level")))
+	var lv := int(_pet_crab.get("speed_level"))
+	if lv == PetCrabScript.AREA_START_LEVEL:
+		_set_event("Crab Lv.%d: it now pulls in every coin around it." % lv)
+	elif lv > PetCrabScript.AREA_START_LEVEL:
+		_set_event("Crab Lv.%d: bigger pickup area (%.1fm)." % [lv, float(_pet_crab.call("get_pickup_radius"))])
+	else:
+		_set_event("Crab Lv.%d: faster." % lv)
 	tutorial_event.emit("upgrade_crab", _pet_crab)
 
 
@@ -716,6 +851,7 @@ func _set_decor_layer(new_layer: int) -> void:
 	decor_layer = new_layer
 	if camera_rig and camera_rig.has_method("set_decor_layer"):
 		camera_rig.call("set_decor_layer", decor_layer)
+	_update_layer_visibility()
 	_update_hud()
 
 
@@ -735,6 +871,7 @@ func _set_decorating_mode(active: bool) -> void:
 			camera_rig.call("set_decor_layer", decor_layer)
 		if camera_rig.has_method("set_decorating_mode"):
 			camera_rig.call("set_decorating_mode", is_decorating_mode)
+	_update_layer_visibility()
 	if is_decorating_mode and not was_active:
 		tutorial_event.emit("decor_on", null)
 	elif was_active and not is_decorating_mode:
@@ -762,24 +899,33 @@ func _on_buy_decoration_pressed(decor_id: String) -> void:
 	if current_phase != WavePhase.PEACEFUL:
 		_set_event("You can only decorate while it is peaceful.")
 		return
-	if _decorations.size() >= PREFERRED_GRID_CELLS.size():
-		_set_event("Every floor tile is already used.")
-		return
 	var entry := TankDecorationScript.get_catalog_entry(decor_id)
-	var cost := int(entry["cost"])
+	var cost := Balance.price(int(entry["cost"]))
 	if coins < cost:
 		_set_event("Need %d coins for %s." % [cost, String(entry["name"])])
+		return
+	# Find room for the footprint (try the rotated footprint too)
+	var foot: Vector2i = entry["foot"]
+	var turns := 0
+	var anchor := TankDecorationScript.find_free_anchor(get_tree(), foot)
+	if anchor.x < 0 and foot.x != foot.y:
+		anchor = TankDecorationScript.find_free_anchor(get_tree(), Vector2i(foot.y, foot.x))
+		turns = 1
+	if anchor.x < 0:
+		_set_event("No free %s space on the floor. Move or remove something first." % TankDecorationScript.footprint_label(foot))
 		return
 	coins -= cost
 	_set_decor_layer(AquariumCameraScript.DECOR_LAYER_FLOOR)
 	if not is_decorating_mode:
 		_set_decorating_mode(true)
-	var cell := _find_free_grid_cell("decorations")
-	var decor := _spawn_decoration(decor_id, cell, 0.0)
+	var decor := _spawn_decoration(decor_id, anchor, turns)
 	if camera_rig and camera_rig.has_method("focus_on_fish"):
 		camera_rig.call("focus_on_fish", decor)
 		camera_rig.set("is_move_mode", true)
-	_set_event("%s placed. Click a tile to move it." % String(entry["name"]))
+		if camera_rig.has_method("refresh_grid"):
+			camera_rig.call("refresh_grid")
+	_set_event("%s placed (comfort +%d). Move the mouse and click to set it down." % [String(entry["name"]), int(decor.get("comfort"))])
+	tutorial_event.emit("buy_decor", decor)
 
 
 # =============================================================================
@@ -827,6 +973,8 @@ func _on_ctx_rotate_pressed() -> void:
 			focused.call("rotate_step")
 		else:
 			focused.rotation.y = wrapf(focused.rotation.y + PI * 0.5, 0.0, TAU)
+		if camera_rig and camera_rig.has_method("refresh_grid"):
+			camera_rig.call("refresh_grid")
 
 
 func _on_ctx_remove_decor_pressed() -> void:
@@ -834,13 +982,14 @@ func _on_ctx_remove_decor_pressed() -> void:
 		return
 	var focused: Node3D = _get_focused()
 	if is_instance_valid(focused) and focused.is_in_group("decorations"):
-		var refund := int(focused.get("decor_cost")) / 2
+		var refund := Balance.price(int(focused.get("decor_cost"))) / 2
 		coins += refund
 		var d_name := str(focused.get("decor_name"))
 		_decorations.erase(focused)
 		if camera_rig and camera_rig.has_method("clear_focus"):
 			camera_rig.call("clear_focus")
 		focused.queue_free()
+		_update_comfort()
 		_set_event("Removed %s (+%d coins)." % [d_name, refund])
 
 
@@ -1031,6 +1180,9 @@ func _build_gameplay_hud() -> void:
 	_fish_hungry = UI.make_label("", 10, UI.WARN)
 	(_fish_value.get_parent() as VBoxContainer).add_child(_fish_hungry)
 	_defense_value = _make_stat_block("Archers", UI.ACCENT)
+	_comfort_value = _make_stat_block("Comfort", UI.GOOD)
+	(_comfort_value.get_parent() as Control).tooltip_text = "Decoration comfort for your school. Below 100% fish get bored; decorations also calm stressed fish."
+	(_comfort_value.get_parent() as Control).mouse_filter = Control.MOUSE_FILTER_PASS
 
 	# Controls hint (left, under the stats). Fades out after a while, H shows it again.
 	_controls_hint = UI.make_panel(Color(0.04, 0.085, 0.13, 0.62), 10, 14.0, 10.0)
@@ -1164,8 +1316,8 @@ func _build_shop_bar(parent: Control) -> void:
 		"Upgrades your selected (or lowest) plant so it feeds more fish at once.")
 	_add_shop_card(row, "archer", "Archer Fish", "4", UI.ACCENT,
 		"A defender that shoots and slows Kingfishers. Needs no food.")
-	_add_shop_card(row, "crab", "Crab Speed", "5", UI.WARN,
-		"Makes your Pet Crab move faster so it collects more coins.")
+	_add_shop_card(row, "crab", "Pet Crab", "5", UI.WARN,
+		"Levels 1-6 make your crab faster. Levels 7-12 let it pull in every coin around it, in a growing area.")
 	_add_shop_card(row, "decorate", "Decorate", "6 / B", Color(0.80, 0.70, 1.0),
 		"Pause the timer and arrange plants and decorations. Peaceful phase only.")
 
@@ -1218,14 +1370,17 @@ func _add_shop_card(row: HBoxContainer, id: String, title: String, key: String, 
 	}
 
 
-func _build_decor_bar(parent: Control) -> void:
+func _build_decor_bar(_parent: Control) -> void:
+	# Left-side drawer so the tank floor in the middle of the screen stays clear
 	_decor_panel = UI.make_panel(UI.PANEL_SOLID, 12, 14.0, 12.0)
-	_decor_panel.name = "DecorBar"
+	_decor_panel.name = "DecorDrawer"
 	_decor_panel.visible = false
-	parent.add_child(_decor_panel)
+	_decor_panel.position = Vector2(16.0, 112.0)
+	_decor_panel.custom_minimum_size = Vector2(372.0, 0.0)
+	hud_layer.add_child(_decor_panel)
 
 	var vbox := VBoxContainer.new()
-	vbox.add_theme_constant_override("separation", 10)
+	vbox.add_theme_constant_override("separation", 8)
 	_ignore(vbox)
 	_decor_panel.add_child(vbox)
 
@@ -1233,42 +1388,40 @@ func _build_decor_bar(parent: Control) -> void:
 	header.add_theme_constant_override("separation", 8)
 	_ignore(header)
 	vbox.add_child(header)
-
-	var title := UI.make_label("DECORATE", 13, UI.TEXT)
-	title.custom_minimum_size = Vector2(90.0, 0.0)
+	var title := UI.make_label("Decorate", 16, UI.TEXT)
+	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	title.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	header.add_child(title)
-
-	_surface_tab_btn = UI.make_button("Water surface", "secondary", UI.GOOD, 12, 30.0)
-	_surface_tab_btn.pressed.connect(_set_decor_layer.bind(AquariumCameraScript.DECOR_LAYER_SURFACE))
-	header.add_child(_surface_tab_btn)
-
-	_floor_tab_btn = UI.make_button("Tank floor", "secondary", UI.WARN, 12, 30.0)
-	_floor_tab_btn.pressed.connect(_set_decor_layer.bind(AquariumCameraScript.DECOR_LAYER_FLOOR))
-	header.add_child(_floor_tab_btn)
-
-	var spacer := Control.new()
-	_ignore(spacer)
-	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	spacer.custom_minimum_size = Vector2(24.0, 0.0)
-	header.add_child(spacer)
-
 	var done_btn := UI.make_button("Done  (B)", "primary", UI.ACCENT, 12, 30.0)
 	done_btn.pressed.connect(exit_decorating_mode)
 	header.add_child(done_btn)
 
+	var tabs := HBoxContainer.new()
+	tabs.add_theme_constant_override("separation", 6)
+	_ignore(tabs)
+	vbox.add_child(tabs)
+	_surface_tab_btn = UI.make_button("Water surface", "secondary", UI.GOOD, 12, 30.0)
+	_surface_tab_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_surface_tab_btn.pressed.connect(_set_decor_layer.bind(AquariumCameraScript.DECOR_LAYER_SURFACE))
+	tabs.add_child(_surface_tab_btn)
+	_floor_tab_btn = UI.make_button("Tank floor", "secondary", UI.WARN, 12, 30.0)
+	_floor_tab_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_floor_tab_btn.pressed.connect(_set_decor_layer.bind(AquariumCameraScript.DECOR_LAYER_FLOOR))
+	tabs.add_child(_floor_tab_btn)
+
+	vbox.add_child(UI.make_separator())
+
 	# Surface layer tools
-	_surface_decor_box = HBoxContainer.new()
-	_surface_decor_box.add_theme_constant_override("separation", 8)
+	_surface_decor_box = VBoxContainer.new()
+	_surface_decor_box.add_theme_constant_override("separation", 6)
 	_ignore(_surface_decor_box)
 	vbox.add_child(_surface_decor_box)
 
 	_decor_buy_plant_btn = UI.make_button("", "secondary", UI.GOOD, 12, 34.0)
-	_decor_buy_plant_btn.custom_minimum_size.x = 190.0
 	_decor_buy_plant_btn.pressed.connect(_on_buy_duckweed_pressed)
 	_surface_decor_box.add_child(_decor_buy_plant_btn)
 
 	_decor_upg_plant_btn = UI.make_button("", "secondary", UI.GOOD, 12, 34.0)
-	_decor_upg_plant_btn.custom_minimum_size.x = 230.0
 	_decor_upg_plant_btn.pressed.connect(_on_upgrade_plant_pressed)
 	_surface_decor_box.add_child(_decor_upg_plant_btn)
 
@@ -1276,11 +1429,11 @@ func _build_decor_bar(parent: Control) -> void:
 	rot_btn.pressed.connect(_on_ctx_rotate_pressed)
 	_surface_decor_box.add_child(rot_btn)
 
-	# Floor layer catalog
+	# Floor layer catalog: two columns, name + price on top, size + comfort below
 	_floor_decor_grid = GridContainer.new()
-	_floor_decor_grid.columns = 6
+	_floor_decor_grid.columns = 3
 	_floor_decor_grid.add_theme_constant_override("h_separation", 6)
-	_floor_decor_grid.add_theme_constant_override("v_separation", 6)
+	_floor_decor_grid.add_theme_constant_override("v_separation", 5)
 	_floor_decor_grid.visible = false
 	_ignore(_floor_decor_grid)
 	vbox.add_child(_floor_decor_grid)
@@ -1289,17 +1442,54 @@ func _build_decor_bar(parent: Control) -> void:
 		var d_id := String(item["id"])
 		var d_name := String(item["name"])
 		var d_cost := int(item["cost"])
-		var d_btn := UI.make_button("%s   %d" % [d_name, d_cost], "secondary", UI.WARN, 12, 32.0)
-		d_btn.custom_minimum_size.x = 124.0
+		var d_foot: Vector2i = item["foot"]
+		var d_comfort := TankDecorationScript.comfort_for_cost(d_cost)
+		var d_btn := Button.new()
+		d_btn.focus_mode = Control.FOCUS_NONE
+		d_btn.custom_minimum_size = Vector2(110.0, 40.0)
+		UI.style_button(d_btn, "secondary", UI.WARN, 8)
+		d_btn.tooltip_text = "%s: covers %s floor tiles. Comfort +%d (keeps fish happy and calms stressed fish)." % [d_name, TankDecorationScript.footprint_label(d_foot), d_comfort]
 		d_btn.pressed.connect(_on_buy_decoration_pressed.bind(d_id))
 		_floor_decor_grid.add_child(d_btn)
+
+		var m := MarginContainer.new()
+		_ignore(m)
+		m.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		m.add_theme_constant_override("margin_left", 8)
+		m.add_theme_constant_override("margin_right", 7)
+		m.add_theme_constant_override("margin_top", 4)
+		m.add_theme_constant_override("margin_bottom", 4)
+		d_btn.add_child(m)
+		var col := VBoxContainer.new()
+		_ignore(col)
+		col.add_theme_constant_override("separation", 0)
+		col.alignment = BoxContainer.ALIGNMENT_CENTER
+		m.add_child(col)
+		var row1 := HBoxContainer.new()
+		_ignore(row1)
+		col.add_child(row1)
+		var n_lbl := UI.make_label(d_name, 11, UI.TEXT)
+		n_lbl.clip_text = true
+		n_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		row1.add_child(n_lbl)
+		var c_lbl := UI.make_label(str(Balance.price(d_cost)), 11, UI.GOLD)
+		row1.add_child(c_lbl)
+		var row2 := HBoxContainer.new()
+		_ignore(row2)
+		col.add_child(row2)
+		var f_lbl := UI.make_label(TankDecorationScript.footprint_label(d_foot), 10, UI.TEXT_MUTED)
+		f_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		row2.add_child(f_lbl)
+		row2.add_child(UI.make_label("+%d" % d_comfort, 10, UI.GOOD))
 		_decor_buttons.append({
 			"btn": d_btn,
-			"cost": d_cost,
+			"cost": Balance.price(d_cost),
+			"cost_lbl": c_lbl,
 		})
 
 	_decor_hint = UI.make_label("", 11, UI.TEXT_FAINT)
-	_decor_hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_decor_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_decor_hint.custom_minimum_size = Vector2(344.0, 0.0)
 	vbox.add_child(_decor_hint)
 
 
@@ -1482,19 +1672,39 @@ func _update_hud() -> void:
 	_set_text(_coins_value, str(coins))
 	var alive_fish := 0
 	var hungry_fish := 0
+	var stressed_fish := 0
+	var bored_fish := 0
 	for node in get_tree().get_nodes_in_group("goldfish"):
 		if is_instance_valid(node) and not bool(node.get("is_dead")):
 			alive_fish += 1
 			if int(node.get("hunger_status")) == SwimmingFishScript.HungerStatus.HUNGRY:
 				hungry_fish += 1
+			var m := int(node.get("mood"))
+			if m == SwimmingFishScript.Mood.STRESSED:
+				stressed_fish += 1
+			elif m == SwimmingFishScript.Mood.BORED and bool(node.call("is_coin_penalized")):
+				bored_fish += 1
 	_set_text(_fish_value, str(alive_fish))
-	_set_text(_fish_hungry, ("%d hungry" % hungry_fish) if hungry_fish > 0 else "")
+	var notes := PackedStringArray()
+	if hungry_fish > 0:
+		notes.append("%d hungry" % hungry_fish)
+	if stressed_fish > 0:
+		notes.append("%d stressed" % stressed_fish)
+	if bored_fish > 0:
+		notes.append("%d bored" % bored_fish)
+	_set_text(_fish_hungry, "  ".join(notes))
+	var pct := int(roundf(tank_comfort_ratio * 100.0))
+	_set_text(_comfort_value, "%d%%" % pct if pct <= 300 else "300%+")
+	# Easy difficulty has no fish moods, so comfort does not matter there
+	_set_btn_visible(_comfort_value.get_parent() as Control, Balance.moods_enabled())
+	var comfort_col := UI.GOOD if pct >= 100 else (UI.WARN if pct >= 40 else UI.BAD)
+	_comfort_value.add_theme_color_override("font_color", comfort_col)
 	var archer_count := get_tree().get_nodes_in_group("archerfish").size()
 	_set_text(_defense_value, str(archer_count))
 
 	# --- Wave panel ---
 	var remaining := int(ceilf(maxf(0.0, phase_timer)))
-	_set_text(_wave_title, "TUTORIAL" if is_tutorial else "WAVE %d" % current_wave)
+	_set_text(_wave_title, "TUTORIAL" if is_tutorial else "WAVE %d   %s" % [current_wave, Balance.difficulty_name().to_upper()])
 	var frac := clampf(phase_timer / maxf(phase_duration, 0.01), 0.0, 1.0)
 	match current_phase:
 		WavePhase.PEACEFUL:
@@ -1561,7 +1771,8 @@ func _update_hud() -> void:
 		var lv := int(_pet_crab.get("speed_level"))
 		if bool(_pet_crab.call("can_upgrade_speed")):
 			var c_cost := int(_pet_crab.call("get_upgrade_cost"))
-			_set_card("crab", str(c_cost), "Lv.%d" % lv, coins >= c_cost, true)
+			var nxt := "area" if lv + 1 >= PetCrabScript.AREA_START_LEVEL else "speed"
+			_set_card("crab", str(c_cost), "Lv.%d %s" % [lv + 1, nxt], coins >= c_cost, true)
 		else:
 			_set_card("crab", "Max", "Lv.%d" % lv, false, false)
 
@@ -1570,6 +1781,16 @@ func _update_hud() -> void:
 
 	if is_decorating_mode:
 		_update_decor_bar()
+
+	# Keep the tutorial card clear of the decorate drawer (drawer uses the left side)
+	if _tutorial_director != null:
+		var tp: Control = _tutorial_director.get("_panel")
+		if tp:
+			var want_x := 16.0
+			if is_decorating_mode:
+				want_x = get_viewport().get_visible_rect().size.x - tp.size.x - 16.0
+			if absf(tp.position.x - want_x) > 0.5:
+				tp.position.x = want_x
 
 	_update_inspector()
 
@@ -1602,12 +1823,14 @@ func _update_decor_bar() -> void:
 	for d_entry in _decor_buttons:
 		var b: Button = d_entry["btn"]
 		if is_instance_valid(b):
-			b.disabled = coins < int(d_entry["cost"])
+			var afford := coins >= int(d_entry["cost"])
+			b.disabled = not afford
+			(d_entry["cost_lbl"] as Label).add_theme_color_override("font_color", UI.GOLD if afford else UI.BAD)
 
 	if is_surf:
-		_set_text(_decor_hint, "Drag a plant to move it    R rotate    Tab switch to floor    The wave timer is paused")
+		_set_text(_decor_hint, "Drag a plant to move it. R rotates, Tab switches to the floor. The wave timer is paused.")
 	else:
-		_set_text(_decor_hint, "Buy an item, then drag it to a tile    R rotate    Tab switch to surface    The wave timer is paused")
+		_set_text(_decor_hint, "Green number = comfort (pricier pieces calm fish more). Drag to move, R rotates, Tab switches to the surface.")
 
 
 func _update_inspector() -> void:
@@ -1664,17 +1887,17 @@ func _update_inspector() -> void:
 		show_upgrade = not bool(_shop_locked.get("crab", false))
 		if bool(focused.call("can_upgrade_speed")):
 			var c_cost := int(focused.call("get_upgrade_cost"))
-			_ctx_upgrade_btn.text = "Upgrade speed to Lv.%d   %d" % [int(focused.get("speed_level")) + 1, c_cost]
+			_ctx_upgrade_btn.text = "%s   %d" % [str(focused.call("get_next_upgrade_text")), c_cost]
 			_ctx_upgrade_btn.disabled = coins < c_cost
 		else:
-			_ctx_upgrade_btn.text = "Top speed reached"
+			_ctx_upgrade_btn.text = "Max level reached"
 			_ctx_upgrade_btn.disabled = true
 	elif focused.is_in_group("decorations"):
 		show_move = is_peaceful
 		show_rotate = is_peaceful
 		show_remove = is_peaceful
 		_ctx_move_btn.text = "Pick a tile..." if move_active else "Move"
-		_ctx_remove_btn.text = "Remove   +%d" % (int(focused.get("decor_cost")) / 2)
+		_ctx_remove_btn.text = "Remove   +%d" % (Balance.price(int(focused.get("decor_cost"))) / 2)
 
 	_set_btn_visible(_ctx_upgrade_btn, show_upgrade)
 	_set_btn_visible(_ctx_move_btn, show_move)

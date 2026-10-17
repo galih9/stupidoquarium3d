@@ -9,6 +9,7 @@ class_name PauseMenu
 const LoadingScreenScript = preload("res://scripts/loading_screen.gd")
 const EncyclopediaScript = preload("res://scripts/encyclopedia_panel.gd")
 const UI = preload("res://scripts/ui_style.gd")
+const Balance = preload("res://scripts/game_balance.gd")
 
 signal pause_toggled(is_paused: bool)
 
@@ -226,7 +227,7 @@ func _refresh_stats() -> void:
 	var plants := get_tree().get_nodes_in_group("duckweed").size()
 	var archers := get_tree().get_nodes_in_group("archerfish").size()
 
-	var head := "Tutorial" if mode == "tutorial" else "Wave %d" % wave
+	var head := "Tutorial" if mode == "tutorial" else "Wave %d (%s)" % [wave, Balance.difficulty_name()]
 	_stats_label.text = "%s   %d coins\n%s   %s   %s" % [
 		head, coins,
 		_plural(alive_fish, "fish", "fish"),

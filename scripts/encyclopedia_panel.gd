@@ -13,6 +13,7 @@ const ArcherFishScript = preload("res://scripts/archer_fish.gd")
 const PetCrabScript = preload("res://scripts/pet_crab.gd")
 const DuckweedTileScript = preload("res://scripts/duckweed_tile.gd")
 const CoinDropScript = preload("res://scripts/coin_drop.gd")
+const TankDecorationScript = preload("res://scripts/tank_decoration.gd")
 
 signal closed
 
@@ -69,15 +70,17 @@ func _build_entries() -> void:
 			"color": UI.GOLD,
 			"model": "res://assets/fih/adult.glb",
 			"anim": "Swim",
-			"desc": "The heart of your tank. Goldfish swim around, drop a coin every few seconds, and grow bigger after enough meals. Bigger fish drop more valuable coins. Keep them fed or they will starve.",
+			"desc": "The heart of your tank. Goldfish drop coins and grow after enough meals, but each size needs a better plant to eat. They start bored: decorations make them happy, and seeing tank mates eaten stresses them until they hide among decorations.",
 			"stats": [
-				["Cost", "%d coins" % Balance.COST_BABY_FISH],
-				["Coins dropped", "Baby %d  /  Medium %d  /  Adult %d" % [coin_c, coin_s, coin_g]],
-				["Coin interval", "About %ds (faster when happy)" % int(Balance.FISH_COIN_INTERVAL)],
+				["Cost", "%d coins" % Balance.price(Balance.COST_BABY_FISH)],
+				["Coins (happy)", "Baby copper %d  /  Medium silver %d  /  Adult gold %d" % [coin_c, coin_s, coin_g]],
+				["Too bored", "Baby none  /  Medium copper  /  Adult silver"],
+				["Bored limit", "%ds without enough decoration" % int(Balance.bored_limit())],
+				["Stressed", "Hides by decorations, slower and cheaper coins"],
 				["Growth", "Medium after %d meals, Adult after %d" % [SwimmingFishScript.MEALS_TO_MEDIUM, SwimmingFishScript.MEALS_TO_ADULT]],
+				["Food needed", "Baby: Duckweed  /  Medium: Lv.2  /  Adult: Hyacinth"],
 				["Stays fed", "%d - %ds after a meal" % [int(Balance.FISH_FED_MIN), int(Balance.FISH_FED_MAX)]],
 				["Starves after", "%ds of being hungry" % int(Balance.FISH_STARVE_TIME)],
-				["Swim speed", "%.1f  /  %.1f  /  %.1f" % [float(fish_speeds[0]), float(fish_speeds[1]), float(fish_speeds[2])]],
 			],
 		},
 		{
@@ -89,7 +92,7 @@ func _build_entries() -> void:
 			"anim": "Swim",
 			"desc": "A sharpshooter that patrols near the surface. When a Kingfisher attacks, it fires water jets that damage the bird and slow it down. Archer Fish never need food.",
 			"stats": [
-				["Cost", "%d coins, +%d for each extra" % [Balance.COST_ARCHER_BASE, Balance.COST_ARCHER_STEP]],
+				["Cost", "%d coins, more for each extra" % Balance.archer_cost(0)],
 				["Damage", "%d per shot" % int(ArcherFishScript.SHOT_DAMAGE)],
 				["Fire rate", "1 shot every %.2fs" % ArcherFishScript.SHOOT_COOLDOWN],
 				["Slow", "Each archer slows birds, up to 70% total"],
@@ -104,11 +107,11 @@ func _build_entries() -> void:
 			"color": UI.WARN,
 			"model": "res://assets/fih/crab.glb",
 			"anim": "Walk",
-			"desc": "Your loyal helper on the sand. The crab walks the tank floor and picks up every coin that lands near it. Upgrade its speed so it reaches coins before they disappear.",
+			"desc": "Your loyal helper on the sand. The crab walks the tank floor and picks up coins that land there. Early upgrades make it faster; from level 7 it pulls in every coin around it at once, in an area that grows with each level.",
 			"stats": [
 				["Cost", "Free - every tank starts with one"],
-				["Speed levels", "1 to %d" % PetCrabScript.MAX_SPEED_LEVEL],
-				["Chase speed", "%.1f at Lv.1, %.1f at Lv.%d" % [crab_speeds[0], crab_speeds[crab_speeds.size() - 1], PetCrabScript.MAX_SPEED_LEVEL]],
+				["Levels 1 - 6", "Speed %.1f up to %.1f" % [crab_speeds[0], crab_speeds[crab_speeds.size() - 1]]],
+				["Levels 7 - 12", "Area pickup, radius %.1fm up to %.1fm" % [PetCrabScript.PICKUP_RADII[6], PetCrabScript.PICKUP_RADII[11]]],
 				["Upgrade costs", ", ".join(crab_cost_list)],
 				["Floor coins", "Vanish after 28s if nobody collects them"],
 			],
@@ -122,9 +125,9 @@ func _build_entries() -> void:
 			"anim": "",
 			"desc": "A floating carpet of tiny leaves. Hungry goldfish swim up to it to eat. Each plant can only feed a few fish at once, so a growing school needs more plants or upgrades.",
 			"stats": [
-				["Cost", "%d coins" % Balance.COST_DUCKWEED],
-				["Lv.1", "Feeds %d fish at a time" % int(dw_feeders[0])],
-				["Lv.2", "Feeds %d fish at a time (upgrade %d)" % [int(dw_feeders[1]), int(dw_costs[0])]],
+				["Cost", "%d coins" % Balance.price(Balance.COST_DUCKWEED)],
+				["Lv.1", "Feeds %d baby fish at a time" % int(dw_feeders[0])],
+				["Lv.2", "Feeds %d baby or medium fish (upgrade %d)" % [int(dw_feeders[1]), int(dw_costs[0])]],
 				["Meal time", "%.0fs per fish" % DuckweedTileScript.FEED_DURATION],
 				["Surface limit", "12 plants"],
 			],
@@ -138,11 +141,28 @@ func _build_entries() -> void:
 			"anim": "",
 			"desc": "The fully upgraded Duckweed. It feeds many fish at once and, when you have at least two adult goldfish, its long roots shelter newborn baby fish.",
 			"stats": [
-				["Lv.1", "Feeds %d fish (upgrade %d)" % [int(dw_feeders[2]), int(dw_costs[1])]],
+				["Lv.1", "Feeds %d fish of any size (upgrade %d)" % [int(dw_feeders[2]), int(dw_costs[1])]],
 				["Lv.1 breeding", "1 baby fish every %d min" % int(float(dw_breed[2]) / 60.0)],
 				["Lv.2", "Feeds %d fish (upgrade %d)" % [int(dw_feeders[3]), int(dw_costs[2])]],
 				["Lv.2 breeding", "1 baby fish every %d min" % int(float(dw_breed[3]) / 60.0)],
 				["Breeding needs", "%d adult goldfish in the tank" % DuckweedTileScript.MIN_ADULTS_FOR_BREEDING],
+			],
+		},
+		{
+			"category": "Tank",
+			"name": "Decorations",
+			"role": "Comfort",
+			"color": Color(0.80, 0.70, 1.0),
+			"model": "res://assets/fih/decorations/coral_tube.glb",
+			"anim": "",
+			"desc": "Rocks, corals and seaweed for the tank floor. Each piece adds Comfort: more expensive pieces add more. Enough comfort keeps fish happy, and stressed fish hide next to decorations to calm down. Pieces cover from 1x1 up to 4x1 or 3x2 floor tiles.",
+			"stats": [
+				["Comfort", "About 1 point per 10 coins of price"],
+				["Comfort needed", "%.1f points per fish for 100%% (Hard: %d)" % [Balance.comfort_per_fish(), int(Balance.COMFORT_PER_FISH)]],
+				["Cheapest", "Small Rock 1x1, 40 coins, +4"],
+				["Long pieces", "Rock Arch 3x1, Grass Row 4x1"],
+				["Big sets", "Kelp Forest 2x3 (+17), Coral Garden 3x2 (+21)"],
+				["Floor grid", "%d x %d tiles, rotate with R" % [TankDecorationScript.FLOOR_COLS, TankDecorationScript.FLOOR_ROWS]],
 			],
 		},
 		{

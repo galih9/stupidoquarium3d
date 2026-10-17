@@ -2,19 +2,28 @@ extends "res://assets/fih/goldfish.gd"
 class_name SwimmingFish
 
 ## Autonomous goldfish controller supporting swimming, idling, duckweed feeding,
-## hunger/stress stats, growth stages, coin dropping on a timer, hit-flash/hitstop/shake effects, and death.
+## hunger, mood (bored / happy / stressed), hiding at decorations when stressed,
+## growth stages, coin dropping on a timer, hit feedback, and death.
+##
+## Mood rules:
+## - Fish start Bored. Decorations (tank comfort) and swimming next to them make fish Happy.
+## - Bored for too long: babies stop making coins, medium fish drop copper, adults drop silver.
+## - Seeing tank mates get eaten builds stress (less with lots of decoration). Stressed fish
+##   hide next to decorations, which calms them faster, and drop slower, cheaper coins.
+## - Each plant tier only feeds certain sizes (see duckweed_tile.gd), so fish need upgraded plants to keep growing.
 ## NOTE FOR FUTURE DEVELOPERS: Never use or put any emojis anywhere in the game.
 
 const CombatVFXScript = preload("res://scripts/combat_vfx.gd")
 const Balance = preload("res://scripts/game_balance.gd")
+const TankDecorationScript = preload("res://scripts/tank_decoration.gd")
 
 const MEALS_TO_MEDIUM: int = 3
 const MEALS_TO_ADULT: int = 7
 
-enum State { IDLE, SWIM, SEEK_FOOD, EATING, DYING }
+enum State { IDLE, SWIM, SEEK_FOOD, EATING, DYING, HIDE }
 enum SizeCategory { BABY, MEDIUM, ADULT }
 enum HungerStatus { FED, HUNGRY }
-enum StressStatus { STRESS, BORED, NORMAL, HAPPY }
+enum Mood { STRESSED, BORED, HAPPY }
 
 const SIZE_SCALES := {
 	SizeCategory.BABY: 0.34,
@@ -43,10 +52,18 @@ const FISH_MODELS := {
 const SIZE_NAMES := ["Baby", "Medium", "Adult"]
 const VARIANT_TITLES := ["Classic", "Golden", "Calico", "Kohaku"]
 const HUNGER_NAMES := ["Fed", "Hungry"]
-const STRESS_NAMES := ["Stress", "Bored", "Normal", "Happy"]
+const MOOD_NAMES := ["Stressed", "Bored", "Happy"]
+const COIN_NAMES := ["copper", "silver", "gold"]
+const PLANT_FOR_SIZE := ["Duckweed", "Duckweed Lv.2", "Water Hyacinth"]
 
-signal coin_dropped(world_pos: Vector3, size_cat: int, stress: int)
+## Shared tank comfort (0 = no decorations, 1 = enough for every fish). Set by the main controller.
+static var tank_comfort_ratio: float = 0.0
+
+## coin_tier follows CoinDrop.CoinTier (0 copper, 1 silver, 2 gold)
+signal coin_dropped(world_pos: Vector3, coin_tier: int)
 signal fish_died(fish: SwimmingFish, reason: String)
+signal mood_changed(fish: SwimmingFish, new_mood: int, penalized: bool)
+signal needs_better_food(fish: SwimmingFish)
 
 @export var size_category: SizeCategory = SizeCategory.BABY
 @export var tank_bounds: AABB = AABB(Vector3(-6.7, 1.05, -3.9), Vector3(13.4, 4.75, 7.8))
@@ -57,7 +74,20 @@ signal fish_died(fish: SwimmingFish, reason: String)
 
 var state: State = State.SWIM
 var hunger_status: HungerStatus = HungerStatus.FED
-var stress_status: StressStatus = StressStatus.NORMAL
+var mood: Mood = Mood.BORED
+var joy: float = Balance.JOY_START
+var stress: float = 0.0
+var bored_time: float = 0.0
+var no_food_for_size: bool = false
+
+var _mood_tick: float = 0.0
+var _was_penalized: bool = false
+var _hide_target: Node3D = null
+var _hide_point: Vector3 = Vector3.ZERO
+var _hide_repick: float = 0.0
+var _food_warned: bool = false
+var _grow_anim_timer: float = 0.0
+const GROW_ANIM_TIME: float = 0.8
 
 var hunger_timer: float = 12.0
 var starve_timer: float = 22.0
@@ -110,7 +140,9 @@ func _ready() -> void:
 
 	# Initialize timers with slight random variation so fish do not sync up
 	hunger_status = HungerStatus.FED
-	stress_status = StressStatus.NORMAL
+	mood = Mood.BORED
+	joy = Balance.JOY_START + randf_range(-6.0, 6.0)
+	_mood_tick = randf() * 0.25
 	hunger_timer = randf_range(fed_duration_min * 0.65, fed_duration_max)
 	starve_timer = max_starve_time
 	coin_timer = randf_range(base_coin_interval * 0.55, base_coin_interval * 1.15)
@@ -227,11 +259,14 @@ func _physics_process(delta: float) -> void:
 
 	state_timer -= delta
 	_update_hunger_and_coins(delta)
+	_update_mood(delta)
 
 	if is_dead or state == State.DYING:
 		return
 
 	match state:
+		State.HIDE:
+			_process_hide(delta)
 		State.SWIM:
 			_process_swim(delta)
 		State.IDLE:
@@ -285,6 +320,14 @@ func _update_hit_effects(delta: float) -> void:
 		_visual_root.position = _base_visual_pos + offset
 		_visual_root.rotation = _base_visual_rot + rot_jitter
 		_visual_root.scale = squash_scale
+	elif _grow_anim_timer > 0.0:
+		# Springy grow: starts a bit small, overshoots, then settles at the new size
+		_grow_anim_timer = maxf(0.0, _grow_anim_timer - delta)
+		var t := 1.0 - _grow_anim_timer / GROW_ANIM_TIME
+		var k := 1.0 - 0.35 * exp(-5.0 * t) * cos(t * 14.0)
+		_visual_root.position = _base_visual_pos
+		_visual_root.rotation = _base_visual_rot + Vector3(0.0, sin(t * PI * 2.0) * 0.25 * (1.0 - t), 0.0)
+		_visual_root.scale = Vector3.ONE * _base_visual_scale * k
 	elif not _is_snatched_anim:
 		_visual_root.position = _base_visual_pos
 		_visual_root.rotation = _base_visual_rot
@@ -294,7 +337,9 @@ func _update_hit_effects(delta: float) -> void:
 func on_predator_strike(_attacker_pos: Vector3) -> void:
 	if is_dead or _is_snatched_anim:
 		return
-	stress_status = StressStatus.STRESS
+	if Balance.moods_enabled():
+		stress = minf(100.0, stress + Balance.stress_self_attacked())
+	_mood_tick = 0.0
 	_attacked_alert_timer = 0.90
 
 	# Trigger bright white flash, brief hit delay (hitstop), and shake animation
@@ -357,23 +402,196 @@ func _update_hunger_and_coins(delta: float) -> void:
 	# 2. Coin drop timer (interval depends on stress level)
 	coin_timer -= delta
 	if coin_timer <= 0.0:
-		var mult := _get_stress_coin_interval_multiplier()
+		var mult := _get_mood_coin_interval_multiplier()
 		coin_timer = randf_range(base_coin_interval * 0.85, base_coin_interval * 1.15) * mult
-		coin_dropped.emit(global_position + Vector3(0.0, -0.15, 0.0), int(size_category), int(stress_status))
+		var tier := get_coin_tier()
+		if tier >= 0:
+			coin_dropped.emit(global_position + Vector3(0.0, -0.15, 0.0), tier)
 
 
-func _get_stress_coin_interval_multiplier() -> float:
-	match stress_status:
-		StressStatus.HAPPY:
-			return 0.72
-		StressStatus.NORMAL:
-			return 1.0
-		StressStatus.BORED:
-			return 1.45
-		StressStatus.STRESS:
-			return 2.1
+func _get_mood_coin_interval_multiplier() -> float:
+	match mood:
+		Mood.HAPPY:
+			return Balance.COIN_INTERVAL_HAPPY
+		Mood.STRESSED:
+			return Balance.COIN_INTERVAL_STRESSED
 		_:
 			return 1.0
+
+
+## True when the fish's mood lowers its coin value (stressed, or bored for too long).
+func is_coin_penalized() -> bool:
+	return mood == Mood.STRESSED or (mood == Mood.BORED and bored_time >= Balance.bored_limit())
+
+
+## Coin tier this fish drops right now: -1 none, 0 copper, 1 silver, 2 gold.
+func get_coin_tier() -> int:
+	var t := int(size_category)
+	if is_coin_penalized():
+		t -= 1
+	return t
+
+
+# =============================================================================
+# Mood
+# =============================================================================
+
+func _update_mood(delta: float) -> void:
+	_mood_tick -= delta
+	if _mood_tick > 0.0:
+		return
+	if not Balance.moods_enabled():
+		# Easy difficulty: no moods, fish are always happy
+		_mood_tick = 0.25
+		mood = Mood.HAPPY
+		joy = 100.0
+		stress = 0.0
+		bored_time = 0.0
+		return
+	var dt := 0.25 - _mood_tick
+	_mood_tick = 0.25
+
+	var comfort := clampf(tank_comfort_ratio, 0.0, 1.5)
+	var near := _nearby_decor_comfort()
+
+	# Stress fades over time, faster in a well decorated tank and next to decorations
+	var decay := Balance.STRESS_DECAY_BASE + comfort * Balance.STRESS_DECAY_COMFORT + near * Balance.STRESS_DECAY_NEAR
+	stress = maxf(0.0, stress - decay * dt)
+
+	# Joy rises with decoration and visits to decorations, and slowly decays into boredom
+	var joy_rate := -Balance.joy_decay()
+	if mood != Mood.STRESSED:
+		joy_rate += comfort * Balance.JOY_GAIN_COMFORT + near * Balance.JOY_GAIN_NEAR
+	joy = clampf(joy + joy_rate * dt, 0.0, 100.0)
+
+	var prev_mood := mood
+	if stress >= Balance.STRESSED_AT or (mood == Mood.STRESSED and stress > Balance.CALM_AT):
+		mood = Mood.STRESSED
+	elif joy >= Balance.HAPPY_AT or (mood == Mood.HAPPY and joy > Balance.UNHAPPY_AT):
+		mood = Mood.HAPPY
+	else:
+		mood = Mood.BORED
+
+	if mood == Mood.BORED:
+		bored_time += dt
+	else:
+		bored_time = 0.0
+
+	var penalized := is_coin_penalized()
+	if mood != prev_mood or penalized != _was_penalized:
+		_on_mood_changed(prev_mood, penalized)
+	_was_penalized = penalized
+
+	# Stressed fish that are not busy eating go hide next to a decoration
+	if mood == Mood.STRESSED and state in [State.SWIM, State.IDLE] and hunger_status == HungerStatus.FED:
+		_enter_hide_state()
+
+
+func _on_mood_changed(prev_mood: Mood, penalized: bool) -> void:
+	var head := global_position + Vector3(0.0, 0.55, 0.0)
+	if mood == Mood.STRESSED and prev_mood != Mood.STRESSED:
+		CombatVFXScript.spawn_text_popup(get_tree(), head, "Stressed", Color(1.0, 0.55, 0.40))
+	elif mood == Mood.HAPPY and prev_mood != Mood.HAPPY:
+		CombatVFXScript.spawn_text_popup(get_tree(), head, "Happy", Color(0.55, 1.0, 0.65))
+	elif mood == Mood.BORED and penalized and not _was_penalized:
+		CombatVFXScript.spawn_text_popup(get_tree(), head, "Bored", Color(0.70, 0.78, 0.88))
+	mood_changed.emit(self, int(mood), penalized)
+
+
+func on_tank_mate_eaten(world_pos: Vector3) -> void:
+	if is_dead or not Balance.moods_enabled():
+		return
+	# Decorations shelter the fish: a well decorated tank softens the shock
+	var protection := clampf(tank_comfort_ratio * 0.4, 0.0, 0.6)
+	var near_factor := 1.0 if global_position.distance_to(world_pos) <= Balance.STRESS_WITNESS_NEAR else 0.6
+	stress = minf(100.0, stress + Balance.stress_per_witness() * (1.0 - protection) * near_factor)
+	joy = maxf(0.0, joy - 10.0)
+	_mood_tick = 0.0
+
+
+func _nearby_decor_comfort() -> float:
+	var total := 0.0
+	for node in get_tree().get_nodes_in_group("decorations"):
+		if not is_instance_valid(node) or not node.has_method("get_center"):
+			continue
+		var c: Vector3 = node.call("get_center")
+		var foot: Vector2i = node.call("get_footprint")
+		var reach := float(maxi(foot.x, foot.y)) * TankDecorationScript.FLOOR_TILE * 0.5 + 1.0
+		var flat := Vector2(global_position.x - c.x, global_position.z - c.z).length()
+		if flat <= reach and global_position.y <= c.y + float(node.call("get_height")) + 1.5:
+			total += float(node.get("comfort"))
+	return total
+
+
+func _find_hide_decoration() -> Node3D:
+	var best: Node3D = null
+	var best_score := -1.0
+	for node in get_tree().get_nodes_in_group("decorations"):
+		if not is_instance_valid(node) or not node.has_method("get_center"):
+			continue
+		var c: Vector3 = node.call("get_center")
+		var score := float(node.get("comfort")) / (1.0 + global_position.distance_to(c) * 0.35)
+		if score > best_score:
+			best_score = score
+			best = node as Node3D
+	return best
+
+
+func _enter_hide_state() -> void:
+	state = State.HIDE
+	_hide_target = _find_hide_decoration()
+	_pick_hide_point()
+	play("Swim", 0.25)
+
+
+func _pick_hide_point() -> void:
+	var min_p := tank_bounds.position
+	var max_p := tank_bounds.position + tank_bounds.size
+	_hide_repick = randf_range(2.0, 4.0)
+	if is_instance_valid(_hide_target):
+		var c: Vector3 = _hide_target.call("get_center")
+		var foot: Vector2i = _hide_target.call("get_footprint")
+		var hw := float(foot.x) * TankDecorationScript.FLOOR_TILE * 0.5
+		var hd := float(foot.y) * TankDecorationScript.FLOOR_TILE * 0.5
+		var top := c.y + float(_hide_target.call("get_height"))
+		_hide_point = Vector3(
+			clampf(c.x + randf_range(-hw, hw), min_p.x, max_p.x),
+			clampf(randf_range(min_p.y, maxf(min_p.y + 0.2, minf(top, min_p.y + 1.2))), min_p.y, max_p.y),
+			clampf(c.z + randf_range(-hd - 0.3, hd + 0.3), min_p.z, max_p.z)
+		)
+	else:
+		# Nowhere to hide: cower near the bottom
+		_hide_point = Vector3(
+			randf_range(min_p.x + 0.8, max_p.x - 0.8),
+			min_p.y + randf_range(0.0, 0.4),
+			randf_range(min_p.z + 0.8, max_p.z - 0.8)
+		)
+
+
+func _process_hide(delta: float) -> void:
+	if mood != Mood.STRESSED:
+		_enter_swim_state()
+		return
+	if not is_instance_valid(_hide_target) and not get_tree().get_nodes_in_group("decorations").is_empty():
+		_hide_target = _find_hide_decoration()
+		_pick_hide_point()
+
+	var to_p := _hide_point - global_position
+	var dist := to_p.length()
+	_hide_repick -= delta
+	if dist < 0.5 and _hide_repick <= 0.0:
+		_pick_hide_point()
+	var desired_dir := to_p / maxf(dist, 0.001) if dist > 0.15 else -global_transform.basis.z
+	desired_dir += _compute_separation() * 0.6
+	if desired_dir.length_squared() > 0.001:
+		desired_dir = desired_dir.normalized()
+	var max_spd: float = SIZE_SPEEDS.get(size_category, 1.5) * (1.1 if dist > 1.0 else 0.35)
+	current_speed = lerpf(current_speed, max_spd, delta * 3.0)
+	_steer_toward(desired_dir, delta, turn_speed * 1.2)
+	global_position += (-global_transform.basis.z) * current_speed * delta
+	var ap := get_animation_player()
+	if ap:
+		ap.speed_scale = 1.1 if dist > 1.0 else 0.8
 
 
 func _process_swim(delta: float) -> void:
@@ -439,6 +657,10 @@ func _process_idle(delta: float) -> void:
 
 func _process_seek_food(delta: float) -> void:
 	var best_free_tile: Node3D = _find_closest_duckweed(true)
+	no_food_for_size = best_free_tile == null and _find_closest_duckweed(false) == null
+	if no_food_for_size and not _food_warned:
+		_food_warned = true
+		needs_better_food.emit(self)
 	if best_free_tile != null:
 		var feed_pt: Vector3 = best_free_tile.call("get_feed_point_for", self) if best_free_tile.has_method("get_feed_point_for") else best_free_tile.call("get_feed_point")
 		var to_feed := feed_pt - global_position
@@ -468,8 +690,10 @@ func _process_seek_food(delta: float) -> void:
 		if ap:
 			ap.speed_scale = 1.35
 	else:
-		# All duckweed tiles are currently occupied; wait near the closest duckweed below the surface
+		# All suitable plants are busy (or none can feed this size); wait near a plant below the surface
 		var any_tile: Node3D = _find_closest_duckweed(false)
+		if any_tile == null:
+			any_tile = _find_closest_duckweed(false, false)
 		var wait_target := Vector3(0.0, 5.1, 0.0) + _wait_offset
 		if any_tile != null and any_tile.has_method("get_wait_point"):
 			wait_target = any_tile.call("get_wait_point") + _wait_offset
@@ -521,11 +745,13 @@ func _process_dying(delta: float) -> void:
 		queue_free()
 
 
-func _find_closest_duckweed(only_available: bool) -> Node3D:
+func _find_closest_duckweed(only_available: bool, only_compatible: bool = true) -> Node3D:
 	var best: Node3D = null
 	var best_dist := INF
 	for node in get_tree().get_nodes_in_group("duckweed"):
 		if not (node is Node3D):
+			continue
+		if only_compatible and node.has_method("can_feed_size") and not bool(node.call("can_feed_size", int(size_category))):
 			continue
 		if only_available and node.has_method("is_available") and not bool(node.call("is_available")):
 			continue
@@ -545,6 +771,8 @@ func complete_feeding() -> void:
 	hunger_timer = randf_range(fed_duration_min, fed_duration_max)
 	starve_timer = max_starve_time
 	meals_eaten += 1
+	_food_warned = false
+	no_food_for_size = false
 
 	# Grow baby -> medium -> adult as the fish eats duckweed meals
 	if size_category == SizeCategory.BABY and meals_eaten >= MEALS_TO_MEDIUM:
@@ -585,18 +813,17 @@ func _grow_to_size(new_size: SizeCategory) -> void:
 				ap.get_animation(n).loop_mode = Animation.LOOP_LINEAR
 	play("Swim", 0.2)
 
-	# Brief celebratory flash & pop when growing to next size stage
-	_flash_duration = 0.16
-	_flash_timer = _flash_duration
-	_shake_duration = 0.20
-	_shake_timer = _shake_duration
-	_shake_intensity = 0.12
-	CombatVFXScript.spawn_hit_effect(
+	# Gentle growth celebration: springy "pop" into the new size with a rising
+	# spiral of glowing motes and bubbles. No white flash or shake, so it never
+	# looks like the fish was hit.
+	_flash_timer = 0.0
+	_shake_timer = 0.0
+	_grow_anim_timer = GROW_ANIM_TIME
+	CombatVFXScript.spawn_growth_effect(
 		get_tree(),
 		global_position,
-		false,
-		"GREW TO %s!" % SIZE_NAMES[int(new_size)].to_upper(),
-		Color(0.45, 1.0, 0.55, 1.0)
+		"Grown up: %s" % SIZE_NAMES[int(new_size)],
+		Color(0.55, 1.0, 0.75, 1.0)
 	)
 
 
@@ -663,6 +890,10 @@ func _update_overhead_label() -> void:
 			_status_label.visible = true
 			_status_label.modulate = Color(1.0, 0.36, 0.32, 0.94)
 			_status_label.text = "%.0fs" % ceilf(starve_timer)
+		elif no_food_for_size:
+			_status_label.visible = true
+			_status_label.modulate = Color(1.0, 0.76, 0.34, 0.92)
+			_status_label.text = "Needs %s" % PLANT_FOR_SIZE[clampi(int(size_category), 0, 2)]
 		elif is_selected:
 			_status_label.visible = true
 			_status_label.modulate = Color(1.0, 0.86, 0.36, 0.88)
@@ -746,6 +977,19 @@ func _enter_seek_food_state() -> void:
 func _pick_new_target() -> void:
 	var min_p := tank_bounds.position
 	var max_p := tank_bounds.position + tank_bounds.size
+	# Fish like to visit decorations; each visit cheers them up (see _nearby_decor_comfort)
+	var decor: Array = get_tree().get_nodes_in_group("decorations") if is_inside_tree() else []
+	if not decor.is_empty() and randf() < 0.35:
+		var d: Node = decor[randi() % decor.size()]
+		if is_instance_valid(d) and d.has_method("get_center"):
+			var c: Vector3 = d.call("get_center")
+			var top := c.y + float(d.call("get_height"))
+			target_position = Vector3(
+				clampf(c.x + randf_range(-0.8, 0.8), min_p.x, max_p.x),
+				clampf(top + randf_range(0.1, 1.0), min_p.y, max_p.y),
+				clampf(c.z + randf_range(-0.8, 0.8), min_p.z, max_p.z)
+			)
+			return
 	for _i in range(6):
 		var candidate := Vector3(
 			randf_range(min_p.x, max_p.x),
@@ -764,20 +1008,26 @@ func _pick_new_target() -> void:
 	target_position = tank_bounds.get_center()
 
 
-func set_stress_status(new_status: StressStatus) -> void:
-	stress_status = new_status
-
-
-func cycle_stress_status() -> void:
-	stress_status = ((int(stress_status) + 1) % STRESS_NAMES.size()) as StressStatus
-
-
 func get_hunger_status_name() -> String:
 	return HUNGER_NAMES[clampi(int(hunger_status), 0, HUNGER_NAMES.size() - 1)]
 
 
-func get_stress_status_name() -> String:
-	return STRESS_NAMES[clampi(int(stress_status), 0, STRESS_NAMES.size() - 1)]
+func get_mood_name() -> String:
+	return MOOD_NAMES[clampi(int(mood), 0, MOOD_NAMES.size() - 1)]
+
+
+func get_mood_description() -> String:
+	match mood:
+		Mood.HAPPY:
+			return "Happy - full value coins"
+		Mood.STRESSED:
+			return "Stressed - hiding, slower and cheaper coins"
+		_:
+			if is_coin_penalized():
+				if size_category == SizeCategory.BABY:
+					return "Too bored - makes no coins"
+				return "Too bored - only %s coins" % COIN_NAMES[clampi(get_coin_tier(), 0, 2)]
+			return "Bored - cheaper coins in %ds (add decorations)" % int(ceilf(Balance.bored_limit() - bored_time))
 
 
 func get_display_label() -> String:
@@ -786,18 +1036,24 @@ func get_display_label() -> String:
 	var hunger_str := "Fed"
 	if hunger_status == HungerStatus.HUNGRY:
 		hunger_str = "Hungry, starves in %.0fs" % ceilf(starve_timer)
+		if no_food_for_size:
+			hunger_str += " - needs %s or better" % PLANT_FOR_SIZE[clampi(int(size_category), 0, 2)]
 	var growth_str := "Fully grown"
 	if size_category == SizeCategory.BABY:
 		growth_str = "Meals %d / %d to grow" % [meals_eaten, MEALS_TO_MEDIUM]
 	elif size_category == SizeCategory.MEDIUM:
 		growth_str = "Meals %d / %d to grow" % [meals_eaten, MEALS_TO_ADULT]
-	return "%s Goldfish (%s) | %s | Mood: %s | %s | Next coin in %.0fs" % [
+	var coin_str := "No coins while this bored"
+	var tier := get_coin_tier()
+	if tier >= 0:
+		coin_str = "Next %s coin in %.0fs" % [COIN_NAMES[tier], ceilf(maxf(0.0, coin_timer))]
+	return "%s Goldfish (%s) | %s | %s | %s | %s" % [
 		VARIANT_TITLES[v_idx],
 		SIZE_NAMES[s_idx],
 		hunger_str,
-		get_stress_status_name(),
+		get_mood_description(),
 		growth_str,
-		ceilf(maxf(0.0, coin_timer))
+		coin_str
 	]
 
 

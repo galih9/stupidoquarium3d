@@ -11,6 +11,7 @@ const UI = preload("res://scripts/ui_style.gd")
 
 var _menu_column: VBoxContainer = null
 var _settings_panel: PanelContainer = null
+var _difficulty_panel: PanelContainer = null
 var _encyclopedia: PanelContainer = null
 var _shake_btn: Button = null
 var _fullscreen_btn: Button = null
@@ -84,7 +85,10 @@ func _build_menu_ui() -> void:
 	var hint := UI.make_label("First time here? Start with the Tutorial.", 12, UI.TEXT_FAINT)
 	_menu_column.add_child(hint)
 
-	# Right side: settings card and encyclopedia (only one visible at a time)
+	# Right side: difficulty picker, settings card and encyclopedia (only one visible at a time)
+	_difficulty_panel = _build_difficulty_panel()
+	main_hbox.add_child(_difficulty_panel)
+
 	_settings_panel = _build_settings_panel()
 	main_hbox.add_child(_settings_panel)
 
@@ -92,6 +96,57 @@ func _build_menu_ui() -> void:
 	_encyclopedia.visible = false
 	_encyclopedia.connect("closed", _on_encyclopedia_closed)
 	main_hbox.add_child(_encyclopedia)
+
+
+func _build_difficulty_panel() -> PanelContainer:
+	var panel := UI.make_panel(UI.PANEL_SOLID, 14, 22.0, 20.0)
+	panel.custom_minimum_size = Vector2(380.0, 0.0)
+	panel.visible = false
+
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 10)
+	panel.add_child(vbox)
+	vbox.add_child(UI.make_label("Choose difficulty", 20, UI.TEXT))
+	vbox.add_child(UI.make_label("You can pick a different one every run.", 12, UI.TEXT_MUTED))
+	vbox.add_child(UI.make_separator())
+
+	var last := str(Engine.get_meta("difficulty", "medium"))
+	var options := [
+		["easy", "Easy", UI.GOOD, "Everything costs 30% less\nFish have no moods and are always happy\nLong warning before birds attack (20s)"],
+		["medium", "Medium", UI.ACCENT, "Normal prices\nForgiving moods: fish get bored slowly, stress less\nNormal warning before attacks (12s)"],
+		["hard", "Hard", UI.BAD, "Normal prices\nFull mood system: boredom and stress bite hard\nShort warning before attacks (7s)"],
+	]
+	for opt in options:
+		var btn := Button.new()
+		btn.focus_mode = Control.FOCUS_NONE
+		btn.custom_minimum_size = Vector2(336.0, 92.0)
+		UI.style_button(btn, "secondary" if opt[0] != last else "hud", opt[2], 10)
+		btn.pressed.connect(_on_difficulty_chosen.bind(String(opt[0])))
+		vbox.add_child(btn)
+		var m := MarginContainer.new()
+		m.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		m.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		for side in ["left", "right", "top", "bottom"]:
+			m.add_theme_constant_override("margin_" + side, 14 if side in ["left", "right"] else 10)
+		btn.add_child(m)
+		var col := VBoxContainer.new()
+		col.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		col.add_theme_constant_override("separation", 2)
+		m.add_child(col)
+		var head := HBoxContainer.new()
+		head.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		col.add_child(head)
+		var t := UI.make_label(String(opt[1]), 16, opt[2])
+		t.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		head.add_child(t)
+		if opt[0] == last and Engine.has_meta("difficulty"):
+			head.add_child(UI.make_label("last played", 10, UI.TEXT_FAINT))
+		col.add_child(UI.make_label(String(opt[3]), 11, UI.TEXT_MUTED))
+
+	var back := UI.make_button("Back", "ghost", UI.TEXT_MUTED)
+	back.pressed.connect(func() -> void: panel.visible = false)
+	vbox.add_child(back)
+	return panel
 
 
 func _build_settings_panel() -> PanelContainer:
@@ -136,6 +191,8 @@ func _refresh_settings_labels() -> void:
 
 
 func _close_panels() -> void:
+	if _difficulty_panel:
+		_difficulty_panel.visible = false
 	if _settings_panel:
 		_settings_panel.visible = false
 	if _encyclopedia:
@@ -143,6 +200,13 @@ func _close_panels() -> void:
 
 
 func _on_start_pressed() -> void:
+	var open_it := not _difficulty_panel.visible
+	_close_panels()
+	_difficulty_panel.visible = open_it
+
+
+func _on_difficulty_chosen(diff: String) -> void:
+	Engine.set_meta("difficulty", diff)
 	Engine.set_meta("game_mode", "endless")
 	LoadingScreenScript.transition_to(get_tree(), "res://main.tscn")
 
@@ -155,6 +219,8 @@ func _on_tutorial_pressed() -> void:
 func _on_encyclopedia_pressed() -> void:
 	if _settings_panel:
 		_settings_panel.visible = false
+	if _difficulty_panel:
+		_difficulty_panel.visible = false
 	if _encyclopedia:
 		_encyclopedia.visible = not _encyclopedia.visible
 
@@ -166,6 +232,8 @@ func _on_encyclopedia_closed() -> void:
 func _on_settings_pressed() -> void:
 	if _encyclopedia:
 		_encyclopedia.visible = false
+	if _difficulty_panel:
+		_difficulty_panel.visible = false
 	if _settings_panel:
 		_settings_panel.visible = not _settings_panel.visible
 		_refresh_settings_labels()

@@ -14,6 +14,14 @@ This applies strictly to all UI labels, in-game text, shaders, GDScript code com
 - All difficulty and economy numbers live in `scripts/game_balance.gd` (starting coins, hunger timers, phase durations, bird count/HP/speed/aggression per wave, click damage). Tune there; the Encyclopedia reads the same values.
 - Camera shake is never triggered by manual bird clicks, archer hits, or predator pecks. Only kills and snatches use a small shake (and the Screen Shake setting can turn it off).
 
+## Fish Mood, Food and Decorations
+- Goldfish moods (`scripts/swimming_fish.gd`): start Bored; tank Comfort (sum of decoration comfort / fish x `COMFORT_PER_FISH`) and swimming next to decorations raise joy until they are Happy. Bored longer than `BORED_PENALTY_TIME`: babies drop no coins, medium drop copper, adults drop silver. Seeing tank mates eaten adds stress (softened by comfort); Stressed fish hide next to decorations (state `HIDE`) and drop slower, cheaper coins. All numbers are in `game_balance.gd`.
+- Plant tiers gate fish size (`duckweed_tile.gd` `TIER_MAX_FISH_SIZE`): Duckweed Lv.1 babies only, Lv.2 adds medium, Water Hyacinth feeds adults.
+- Decorations (`scripts/tank_decoration.gd`) sit on a 14x8 floor grid (`FLOOR_TILE` 0.95) with multi-tile footprints (1x1 up to 4x1, 2x3, 3x2) and multi-model sets. `grid_cell` is the footprint anchor (lowest column/row); rotation swaps the footprint and is refused if it would overlap. `comfort` = cost / 10.
+- While decorating the floor, fish, plants, water surface and bubbles are hidden (`_update_layer_visibility` in `aquarium_main.gd`).
+- Pet Crab has 12 levels: 1-6 speed, 7-12 area pickup (`PICKUP_RADII`), coins glide into the crab (`CoinDrop.attract_to`).
+- Collected coins sparkle in 3D and a coin token flies to the HUD coin counter.
+
 ## Architecture Overview
 - `menu.tscn` / `scripts/main_menu.gd`: Minimal 2D Main Menu: Play Endless, Tutorial, Encyclopedia, Settings, Quit.
 - `scripts/ui_style.gd`: Shared colors, panels, buttons, progress bars and labels used by every screen. Use it for any new UI so the look stays consistent.

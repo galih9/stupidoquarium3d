@@ -10,6 +10,7 @@ class_name DuckweedTile
 ## NOTE FOR FUTURE DEVELOPERS: Never use or put any emojis anywhere in the game.
 
 const CombatVFXScript = preload("res://scripts/combat_vfx.gd")
+const Balance = preload("res://scripts/game_balance.gd")
 
 enum ProducerTier {
 	DUCKWEED_LV1_SPARSE = 0,
@@ -40,6 +41,10 @@ const TIER_SHORT_NAMES := [
 ]
 
 const TIER_MAX_FEEDERS := [1, 2, 4, 8]
+# Biggest goldfish size each tier can feed (0 = Baby, 1 = Medium, 2 = Adult).
+# Duckweed Lv.1 only feeds babies, Lv.2 adds medium fish, Water Hyacinth feeds adults too.
+const TIER_MAX_FISH_SIZE := [0, 1, 2, 2]
+const SIZE_LABELS := ["Baby fish only", "Baby and Medium fish", "All fish sizes", "All fish sizes"]
 const TIER_BREED_INTERVALS := [0.0, 0.0, 180.0, 60.0]
 const TIER_UPGRADE_COSTS := [180, 360, 650, 0]
 
@@ -265,7 +270,7 @@ func can_upgrade() -> bool:
 func get_upgrade_cost() -> int:
 	if not can_upgrade():
 		return 0
-	return TIER_UPGRADE_COSTS[clampi(int(tier), 0, TIER_UPGRADE_COSTS.size() - 1)]
+	return Balance.price(TIER_UPGRADE_COSTS[clampi(int(tier), 0, TIER_UPGRADE_COSTS.size() - 1)])
 
 
 func get_next_tier_name() -> String:
@@ -279,15 +284,28 @@ func upgrade_tier() -> bool:
 		return false
 	tier = (int(tier) + 1) as ProducerTier
 	_rebuild_model()
-	CombatVFXScript.spawn_hit_effect(
+	CombatVFXScript.spawn_growth_effect(
 		get_tree(),
 		global_position + Vector3(0.0, 0.15, 0.0),
-		false,
-		"UPGRADED: %s" % TIER_SHORT_NAMES[int(tier)].to_upper(),
+		"Upgraded: %s" % TIER_SHORT_NAMES[int(tier)],
 		Color(0.45, 1.0, 0.65, 1.0)
 	)
 	upgraded.emit(self, int(tier))
 	return true
+
+
+func get_max_fish_size() -> int:
+	return TIER_MAX_FISH_SIZE[clampi(int(tier), 0, TIER_MAX_FISH_SIZE.size() - 1)]
+
+
+func can_feed_size(size_cat: int) -> bool:
+	return size_cat <= get_max_fish_size()
+
+
+func can_feed_fish(fish: Node3D) -> bool:
+	if fish == null or not is_instance_valid(fish):
+		return false
+	return can_feed_size(int(fish.get("size_category")))
 
 
 func is_available() -> bool:
@@ -306,7 +324,7 @@ func begin_feeding(fish: Node3D) -> bool:
 		return false
 	if is_feeding_fish(fish):
 		return true
-	if not is_available():
+	if not is_available() or not can_feed_fish(fish):
 		return false
 
 	var used_slots: Array[int] = []
@@ -367,7 +385,8 @@ func get_wait_point() -> Vector3:
 
 func get_display_label() -> String:
 	var t_name: String = TIER_NAMES[clampi(int(tier), 0, TIER_NAMES.size() - 1)]
-	var feed_str := "Feeding %d of %d fish" % [get_active_feeder_count(), get_max_feeders()]
+	var feed_str := "Feeds: %s" % SIZE_LABELS[clampi(int(tier), 0, SIZE_LABELS.size() - 1)]
+	feed_str += " | Feeding %d of %d fish" % [get_active_feeder_count(), get_max_feeders()]
 	var interval := get_breed_interval()
 	if interval > 0.0:
 		var adults := _count_alive_adult_goldfish()
@@ -376,7 +395,7 @@ func get_display_label() -> String:
 		else:
 			feed_str += " | Breeding needs %d adults (%d now)" % [MIN_ADULTS_FOR_BREEDING, adults]
 	else:
-		feed_str += " | Upgrade to feed more fish"
+		feed_str += " | Upgrade to feed more and bigger fish"
 	return "%s | %s" % [t_name, feed_str]
 
 

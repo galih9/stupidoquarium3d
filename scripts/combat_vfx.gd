@@ -12,6 +12,7 @@ var _duration: float = 0.50
 var _particles: Array[Dictionary] = []
 var _popup_label: Label3D = null
 var _popup_base_y: float = 0.45
+var _popup_style: String = "punch"
 
 
 static func create_flash_material() -> StandardMaterial3D:
@@ -146,6 +147,139 @@ static func spawn_water_splash(
 	fx._build_water_splash(intensity)
 
 
+## Small floating text only (no sparks), e.g. mood changes or "No room to rotate".
+static func spawn_text_popup(
+	tree: SceneTree,
+	world_pos: Vector3,
+	popup_text: String,
+	color: Color = Color(0.9, 0.96, 1.0, 1.0)
+) -> void:
+	if tree == null or tree.current_scene == null:
+		return
+	var fx := CombatVFX.new()
+	fx.name = "TextPopupVFX"
+	fx.top_level = true
+	tree.current_scene.add_child(fx)
+	fx.global_position = world_pos
+	fx._build_text_popup(popup_text, color)
+
+
+## Golden sparkle burst used when a coin is collected.
+static func spawn_coin_sparkle(tree: SceneTree, world_pos: Vector3, color: Color = Color(1.0, 0.85, 0.35, 1.0)) -> void:
+	if tree == null or tree.current_scene == null:
+		return
+	var fx := CombatVFX.new()
+	fx.name = "CoinSparkleVFX"
+	fx.top_level = true
+	tree.current_scene.add_child(fx)
+	fx.global_position = world_pos
+	fx._build_coin_sparkle(color)
+
+
+## Calm, celebratory growth effect for goldfish evolution: rising spiral of
+## glowing motes and bubbles plus a soft label. No flash, no shake, no sparks,
+## so it never reads as the fish being hurt.
+static func spawn_growth_effect(tree: SceneTree, world_pos: Vector3, popup_text: String, color: Color = Color(0.55, 1.0, 0.75, 1.0)) -> void:
+	if tree == null or tree.current_scene == null:
+		return
+	var fx := CombatVFX.new()
+	fx.name = "GrowthVFX"
+	fx.top_level = true
+	tree.current_scene.add_child(fx)
+	fx.global_position = world_pos
+	fx._build_growth(popup_text, color)
+
+
+func _make_popup(popup_text: String, color: Color, pixel: float, size: int) -> void:
+	_popup_label = Label3D.new()
+	_popup_label.position = Vector3(0.0, _popup_base_y, 0.0)
+	_popup_label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	_popup_label.no_depth_test = true
+	_popup_label.pixel_size = pixel
+	_popup_label.font_size = size
+	_popup_label.outline_size = 9
+	_popup_label.modulate = color
+	_popup_label.outline_modulate = Color(0.04, 0.06, 0.08, 0.92)
+	_popup_label.text = popup_text
+	add_child(_popup_label)
+
+
+func _build_text_popup(popup_text: String, color: Color) -> void:
+	_duration = 1.1
+	_popup_base_y = 0.2
+	_popup_style = "soft"
+	_make_popup(popup_text, color, 0.0036, 30)
+
+
+func _build_coin_sparkle(color: Color) -> void:
+	_duration = 0.5
+	var mesh := BoxMesh.new()
+	mesh.size = Vector3(0.07, 0.07, 0.07)
+	for i in range(10):
+		var p_inst := MeshInstance3D.new()
+		var p_mat := StandardMaterial3D.new()
+		p_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		p_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		p_mat.albedo_color = Color(color.r * 1.6, color.g * 1.5, color.b * 1.2, 0.95)
+		p_inst.mesh = mesh
+		p_inst.material_override = p_mat
+		p_inst.rotation = Vector3(randf() * TAU, randf() * TAU, randf() * TAU)
+		add_child(p_inst)
+		var angle := TAU * float(i) / 10.0 + randf_range(-0.2, 0.2)
+		var vel := Vector3(cos(angle) * randf_range(1.0, 2.0), randf_range(1.8, 3.2), sin(angle) * randf_range(1.0, 2.0))
+		_particles.append({
+			"node": p_inst,
+			"mat": p_mat,
+			"vel": vel,
+			"gravity": 5.0,
+			"base_scale": randf_range(0.7, 1.2),
+			"spin": randf_range(6.0, 12.0),
+		})
+
+
+func _build_growth(popup_text: String, color: Color) -> void:
+	_duration = 1.35
+	_popup_style = "soft"
+	var mote_mesh := BoxMesh.new()
+	mote_mesh.size = Vector3(0.06, 0.06, 0.06)
+	var bubble_mesh := SphereMesh.new()
+	bubble_mesh.radius = 0.05
+	bubble_mesh.height = 0.1
+	bubble_mesh.radial_segments = 8
+	bubble_mesh.rings = 4
+	for i in range(18):
+		var is_bubble := i % 3 == 0
+		var p_inst := MeshInstance3D.new()
+		var p_mat := StandardMaterial3D.new()
+		p_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		p_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		if is_bubble:
+			p_mat.albedo_color = Color(0.85, 0.97, 1.0, 0.6)
+			p_inst.mesh = bubble_mesh
+		else:
+			p_mat.albedo_color = Color(color.r * 1.5, color.g * 1.5, color.b * 1.5, 0.95)
+			p_inst.mesh = mote_mesh
+			p_inst.rotation = Vector3(PI * 0.25, PI * 0.25, 0.0)
+		p_inst.material_override = p_mat
+		add_child(p_inst)
+		var angle := TAU * float(i) / 18.0
+		var radius := randf_range(0.35, 0.6)
+		p_inst.position = Vector3(cos(angle) * radius, randf_range(-0.25, 0.1), sin(angle) * radius)
+		_particles.append({
+			"node": p_inst,
+			"mat": p_mat,
+			"vel": Vector3(0.0, randf_range(0.7, 1.3), 0.0),
+			"gravity": -0.4,
+			"base_scale": randf_range(0.8, 1.3),
+			"orbit": angle,
+			"orbit_r": radius,
+			"orbit_speed": randf_range(2.5, 3.5),
+		})
+	if popup_text != "":
+		_popup_base_y = 0.55
+		_make_popup(popup_text, Color(color.r, color.g, color.b, 1.0), 0.0040, 34)
+
+
 func _build_hit_burst(is_heavy: bool, popup_text: String, accent_color: Color) -> void:
 	_duration = 0.56 if is_heavy else 0.42
 	var scale_mult := 1.40 if is_heavy else 1.0
@@ -243,18 +377,34 @@ func _process(delta: float) -> void:
 		if is_instance_valid(node):
 			var vel: Vector3 = p["vel"]
 			vel.y -= float(p["gravity"]) * delta
-			vel *= (1.0 - minf(delta * 3.0, 0.5))
+			if not p.has("orbit"):
+				vel *= (1.0 - minf(delta * 3.0, 0.5))
 			p["vel"] = vel
 			node.position += vel * delta
+			if p.has("orbit"):
+				# Spiral upward around the fish
+				var ang := float(p["orbit"]) + float(p["orbit_speed"]) * delta
+				p["orbit"] = ang
+				var r := float(p["orbit_r"]) * (1.0 + t * 0.4)
+				node.position.x = cos(ang) * r
+				node.position.z = sin(ang) * r
+			if p.has("spin"):
+				node.rotation.y += float(p["spin"]) * delta
 			var sc := float(p["base_scale"]) * (1.0 - t * 0.85)
+			if p.has("orbit"):
+				sc = float(p["base_scale"]) * sin(clampf(t, 0.0, 1.0) * PI)
 			node.scale = Vector3.ONE * maxf(0.05, sc)
 			if mat:
 				mat.albedo_color.a = (1.0 - t) * 0.92
 
 	if _popup_label and is_instance_valid(_popup_label):
-		_popup_label.position.y = _popup_base_y + t * 0.85
-		var pop_scale := 1.0 + sin(minf(t * 3.5, 1.0) * PI) * 0.25
-		_popup_label.scale = Vector3.ONE * pop_scale
+		if _popup_style == "soft":
+			_popup_label.position.y = _popup_base_y + t * 0.5
+			_popup_label.scale = Vector3.ONE * (0.85 + 0.15 * minf(t * 6.0, 1.0))
+		else:
+			_popup_label.position.y = _popup_base_y + t * 0.85
+			var pop_scale := 1.0 + sin(minf(t * 3.5, 1.0) * PI) * 0.25
+			_popup_label.scale = Vector3.ONE * pop_scale
 		_popup_label.modulate.a = clampf(1.0 - maxf(0.0, (t - 0.45) / 0.55), 0.0, 1.0)
 		_popup_label.outline_modulate.a = _popup_label.modulate.a * 0.95
 

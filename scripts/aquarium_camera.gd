@@ -7,6 +7,7 @@ extends Node3D
 ## NOTE FOR FUTURE DEVELOPERS: Never use or put any emojis anywhere in the game.
 
 const CombatVFXScript = preload("res://scripts/combat_vfx.gd")
+const DecorScript = preload("res://scripts/tank_decoration.gd")
 
 signal focus_changed(entity: Node3D)
 signal entity_moved(entity: Node3D)
@@ -20,7 +21,9 @@ const TILE_SIZE: float = 1.85
 
 const TOPDOWN_YAW: float = 0.0
 const TOPDOWN_PITCH: float = -1.52
-const TOPDOWN_DISTANCE: float = 13.8
+const TOPDOWN_DISTANCE: float = 14.6
+# Shift the top-down view so the tank sits right of the decorate drawer on the left
+const TOPDOWN_PIVOT_OFFSET := Vector3(-1.7, 0.0, 0.0)
 
 const DECOR_LAYER_FLOOR: int = 0
 const DECOR_LAYER_SURFACE: int = 1
@@ -64,6 +67,8 @@ var _grid_instance: MeshInstance3D = null
 var _grid_mat: StandardMaterial3D = null
 var _hovered_cell: Vector2i = Vector2i(-1, -1)
 var _hovered_cell_valid: bool = true
+# Floor layer: footprint size of the hover/drag preview (decorations can span many tiles)
+var _hover_size: Vector2i = Vector2i.ONE
 
 var _shake_timer: float = 0.0
 var _shake_duration: float = 0.22
@@ -225,8 +230,7 @@ func start_move_mode_for_selected() -> void:
 			set_decorating_mode(true)
 		is_move_mode = not is_move_mode
 		if is_move_mode:
-			_hovered_cell = focused_fish.get("grid_cell") if focused_fish.get("grid_cell") != null else world_to_grid(focused_fish.global_position)
-			_hovered_cell_valid = true
+			_set_hover_from_entity(focused_fish)
 		_rebuild_grid_visuals()
 		focus_changed.emit(focused_fish)
 
@@ -282,8 +286,7 @@ func _unhandled_input(event: InputEvent) -> void:
 					if is_decorating_mode:
 						# In Decorating Mode, dragging moves the object from tile to tile on the active layer grid
 						_dragging_movable = movable
-						_hovered_cell = movable.get("grid_cell") if movable.get("grid_cell") != null else world_to_grid(movable.global_position)
-						_hovered_cell_valid = true
+						_set_hover_from_entity(movable)
 						_rebuild_grid_visuals()
 					_is_dragging_orbit = false
 					return
@@ -363,11 +366,20 @@ func _unhandled_input(event: InputEvent) -> void:
 				focused_fish.call("rotate_step")
 			else:
 				focused_fish.rotation.y = wrapf(focused_fish.rotation.y + PI * 0.5, 0.0, TAU)
+			_set_hover_from_entity(focused_fish)
+			_rebuild_grid_visuals()
+			entity_moved.emit(focused_fish)
 		elif ke.keycode == KEY_ESCAPE and focused_fish != null and not is_decorating_mode:
 			is_move_mode = false
 			clear_focus()
 			_rebuild_grid_visuals()
 			get_viewport().set_input_as_handled()
+
+
+func refresh_grid() -> void:
+	if is_instance_valid(focused_fish):
+		_set_hover_from_entity(focused_fish)
+	_rebuild_grid_visuals()
 
 
 func trigger_shake(intensity: float = 0.25, duration: float = 0.22) -> void:
@@ -408,6 +420,8 @@ func _process(delta: float) -> void:
 	current_distance = lerpf(current_distance, target_distance, rot_weight)
 
 	var desired_pivot := default_pivot
+	if is_decorating_mode:
+		desired_pivot = default_pivot + TOPDOWN_PIVOT_OFFSET
 	if is_instance_valid(focused_fish):
 		if not is_decorating_mode and not focused_fish.is_in_group("movable_surface") and not focused_fish.is_in_group("movable_floor"):
 			desired_pivot = focused_fish.global_position
@@ -469,10 +483,51 @@ func _handle_click(screen_pos: Vector2) -> void:
 			clear_focus()
 
 
+func _set_hover_from_entity(entity: Node3D) -> void:
+	_hovered_cell_valid = true
+	if not is_instance_valid(entity):
+		return
+	if entity.is_in_group("movable_floor") and entity.has_method("get_footprint"):
+		_hovered_cell = entity.get("grid_cell")
+		_hover_size = entity.call("get_footprint")
+	else:
+		_hovered_cell = entity.get("grid_cell") if entity.get("grid_cell") != null else world_to_grid(entity.global_position)
+		_hover_size = Vector2i.ONE
+
+
+func _floor_cell_under(screen_pos: Vector2) -> Variant:
+	var ray_origin := _camera.project_ray_origin(screen_pos)
+	var ray_dir := _camera.project_ray_normal(screen_pos)
+	var hit_pt: Variant = Plane(Vector3.UP, FLOOR_Y).intersects_ray(ray_origin, ray_dir)
+	if hit_pt is Vector3:
+		return DecorScript.world_to_cell(hit_pt as Vector3)
+	return null
+
+
 func _update_hover_cell_from_screen(screen_pos: Vector2) -> void:
 	if _camera == null:
 		return
-	var active_y := WATER_SURFACE_Y if decor_layer == DECOR_LAYER_SURFACE else FLOOR_Y
+	if decor_layer == DECOR_LAYER_FLOOR:
+		var cell_v: Variant = _floor_cell_under(screen_pos)
+		if cell_v == null:
+			return
+		var cell: Vector2i = cell_v
+		var size := Vector2i.ONE
+		var anchor := cell
+		var valid := DecorScript.is_valid_cell(cell)
+		if is_instance_valid(focused_fish) and focused_fish.is_in_group("movable_floor") and focused_fish.has_method("get_footprint"):
+			size = focused_fish.call("get_footprint")
+			anchor = DecorScript.anchor_centered_on(cell, size)
+			valid = DecorScript.is_area_free(get_tree(), anchor, size, focused_fish)
+		elif valid:
+			valid = DecorScript.is_area_free(get_tree(), anchor, size)
+		if anchor != _hovered_cell or valid != _hovered_cell_valid or size != _hover_size:
+			_hovered_cell = anchor
+			_hover_size = size
+			_hovered_cell_valid = valid
+			_rebuild_grid_visuals()
+		return
+	var active_y := WATER_SURFACE_Y
 	var group_name := "duckweed" if decor_layer == DECOR_LAYER_SURFACE else "decorations"
 	var ray_origin := _camera.project_ray_origin(screen_pos)
 	var ray_dir := _camera.project_ray_normal(screen_pos)
@@ -511,21 +566,16 @@ func _move_entity_to_screen_pos(entity: Node3D, screen_pos: Vector2) -> void:
 			_rebuild_grid_visuals()
 
 	elif decor_layer == DECOR_LAYER_FLOOR and entity.is_in_group("movable_floor") and can_decorate_tank:
-		var floor_plane := Plane(Vector3.UP, FLOOR_Y)
-		var hit_pt: Variant = floor_plane.intersects_ray(ray_origin, ray_dir)
-		if hit_pt is Vector3:
-			var cell := world_to_grid(hit_pt as Vector3)
-			var occupied := is_cell_occupied(cell, "decorations", entity)
-			_hovered_cell = cell
-			_hovered_cell_valid = not occupied
-			if not occupied:
-				var snapped := grid_to_world(cell, FLOOR_Y)
-				if entity.has_method("set_grid_cell"):
-					entity.call("set_grid_cell", cell, snapped)
-				elif entity.has_method("set_floor_position"):
-					entity.call("set_floor_position", snapped)
-				else:
-					entity.global_position = snapped
+		var cell_v: Variant = _floor_cell_under(screen_pos)
+		if cell_v != null and entity.has_method("place_at_anchor"):
+			var size: Vector2i = entity.call("get_footprint")
+			var anchor := DecorScript.anchor_centered_on(cell_v as Vector2i, size)
+			var free := DecorScript.is_area_free(get_tree(), anchor, size, entity)
+			_hovered_cell = anchor
+			_hover_size = size
+			_hovered_cell_valid = free
+			if free:
+				entity.call("place_at_anchor", anchor)
 			_rebuild_grid_visuals()
 
 
@@ -538,6 +588,9 @@ func _rebuild_grid_visuals() -> void:
 
 	# Strictly use decor_layer (never switches based on selection!)
 	var active_surface := (decor_layer == DECOR_LAYER_SURFACE)
+	if not active_surface:
+		_rebuild_floor_grid_visuals()
+		return
 	var grid_y := (WATER_SURFACE_Y + 0.02) if active_surface else (FLOOR_Y + 0.03)
 	var line_col := Color(0.28, 0.98, 0.62, 0.62) if active_surface else Color(0.98, 0.84, 0.36, 0.62)
 	var group_name := "duckweed" if active_surface else "decorations"
@@ -582,6 +635,66 @@ func _rebuild_grid_visuals() -> void:
 		_draw_cell_box(_hovered_cell, grid_y + 0.03, TILE_SIZE * 0.47, h_col)
 
 	_grid_mesh.surface_end()
+
+
+func _rebuild_floor_grid_visuals() -> void:
+	# Fine floor grid: decorations cover multi-tile footprints (e.g. 2x3, 4x1)
+	var grid_y := FLOOR_Y + 0.03
+	var tile := DecorScript.FLOOR_TILE
+	var cols := DecorScript.FLOOR_COLS
+	var rows := DecorScript.FLOOR_ROWS
+	var half_w := float(cols) * tile * 0.5
+	var half_d := float(rows) * tile * 0.5
+	var line_col := Color(0.98, 0.80, 0.30, 0.55)
+
+	_grid_mesh.surface_begin(Mesh.PRIMITIVE_LINES)
+	for c in range(cols + 1):
+		var x := -half_w + float(c) * tile
+		_add_line(Vector3(x, grid_y, -half_d), Vector3(x, grid_y, half_d), line_col)
+	for r in range(rows + 1):
+		var z := -half_d + float(r) * tile
+		_add_line(Vector3(-half_w, grid_y, z), Vector3(half_w, grid_y, z), line_col)
+
+	if get_tree() != null:
+		var occ_col := Color(1.0, 0.70, 0.25, 0.85)
+		for node in get_tree().get_nodes_in_group("decorations"):
+			if not is_instance_valid(node) or not node.has_method("get_footprint"):
+				continue
+			if node == _dragging_movable or (is_move_mode and node == focused_fish):
+				continue
+			_draw_footprint(node.get("grid_cell"), node.call("get_footprint"), grid_y + 0.01, 0.06, occ_col)
+
+	if is_instance_valid(focused_fish) and focused_fish.has_method("get_footprint"):
+		_draw_footprint(focused_fish.get("grid_cell"), focused_fish.call("get_footprint"), grid_y + 0.02, 0.03, Color(1.0, 0.95, 0.55, 0.98))
+
+	if DecorScript.is_valid_cell(_hovered_cell):
+		var h_col := Color(0.35, 1.0, 0.55, 0.96) if _hovered_cell_valid else Color(1.0, 0.35, 0.32, 0.96)
+		_draw_footprint(_hovered_cell, _hover_size, grid_y + 0.03, 0.0, h_col)
+	_grid_mesh.surface_end()
+
+
+func _add_line(a: Vector3, b: Vector3, col: Color) -> void:
+	_grid_mesh.surface_set_color(col)
+	_grid_mesh.surface_add_vertex(a)
+	_grid_mesh.surface_set_color(col)
+	_grid_mesh.surface_add_vertex(b)
+
+
+func _draw_footprint(anchor: Vector2i, size: Vector2i, y_pos: float, inset: float, col: Color) -> void:
+	var tile := DecorScript.FLOOR_TILE
+	var c0 := DecorScript.cell_center(anchor)
+	var x0 := c0.x - tile * 0.5 + inset
+	var z0 := c0.z - tile * 0.5 + inset
+	var x1 := c0.x - tile * 0.5 + float(size.x) * tile - inset
+	var z1 := c0.z - tile * 0.5 + float(size.y) * tile - inset
+	var p0 := Vector3(x0, y_pos, z0)
+	var p1 := Vector3(x1, y_pos, z0)
+	var p2 := Vector3(x1, y_pos, z1)
+	var p3 := Vector3(x0, y_pos, z1)
+	_add_line(p0, p1, col)
+	_add_line(p1, p2, col)
+	_add_line(p2, p3, col)
+	_add_line(p3, p0, col)
 
 
 func _draw_cell_box(cell: Vector2i, y_pos: float, hs: float, col: Color) -> void:
@@ -640,15 +753,13 @@ func _pick_movable_at(screen_pos: Vector2) -> Node3D:
 					return tile
 
 	if check_floor:
-		var floor_hit: Variant = Plane(Vector3.UP, FLOOR_Y).intersects_ray(ray_origin, ray_dir)
-		if floor_hit is Vector3:
-			var pt := floor_hit as Vector3
+		var cell_v: Variant = _floor_cell_under(screen_pos)
+		if cell_v != null:
 			for node in get_tree().get_nodes_in_group("decorations"):
 				if not (node is Node3D) or not is_instance_valid(node):
 					continue
-				var decor := node as Node3D
-				if absf(pt.x - decor.global_position.x) <= TILE_SIZE * 0.48 and absf(pt.z - decor.global_position.z) <= TILE_SIZE * 0.48:
-					return decor
+				if node.has_method("occupies_cell") and bool(node.call("occupies_cell", cell_v)):
+					return node as Node3D
 
 	return null
 

@@ -5,7 +5,15 @@ class_name CoinDrop
 ## Sinks to the sandy bottom and can be clicked or collected automatically.
 ## NOTE FOR FUTURE DEVELOPERS: Never use or put any emojis anywhere in the game.
 
+const CombatVFXScript = preload("res://scripts/combat_vfx.gd")
+
 enum CoinTier { COPPER, SILVER, GOLD }
+
+const SPARKLE_COLORS := {
+	CoinTier.COPPER: Color(1.0, 0.62, 0.35, 1.0),
+	CoinTier.SILVER: Color(0.85, 0.92, 1.0, 1.0),
+	CoinTier.GOLD: Color(1.0, 0.85, 0.30, 1.0),
+}
 
 const COIN_MODELS := {
 	CoinTier.COPPER: preload("res://assets/copper.gltf"),
@@ -29,6 +37,9 @@ var coin_value: int = 20
 var is_collected: bool = false
 ## True when the player clicked the coin (false when the Pet Crab picked it up).
 var collected_by_player: bool = false
+## Set by the Pet Crab's area pickup: the coin glides into the crab, then collects.
+var attract_target: Node3D = null
+var _attract_speed: float = 2.0
 
 var _visual: Node3D = null
 var _hit_area: Area3D = null
@@ -94,6 +105,19 @@ func _process(delta: float) -> void:
 	if _visual:
 		_visual.rotation.y += _spin_speed * delta
 
+	if attract_target != null:
+		if not is_instance_valid(attract_target):
+			attract_target = null
+		else:
+			var goal := attract_target.global_position + Vector3(0.0, 0.35, 0.0)
+			_attract_speed = minf(_attract_speed + delta * 18.0, 14.0)
+			global_position = global_position.move_toward(goal, _attract_speed * delta)
+			if _visual:
+				_visual.rotation.y += delta * 10.0
+			if global_position.distance_to(goal) < 0.25:
+				collect(false)
+			return
+
 	if global_position.y > floor_y:
 		global_position.y = maxf(floor_y, global_position.y - sink_speed * delta)
 		global_position.x += sin(_bob_phase) * 0.12 * delta
@@ -104,11 +128,20 @@ func _process(delta: float) -> void:
 			queue_free()
 
 
+func attract_to(target: Node3D) -> void:
+	if is_collected or attract_target != null:
+		return
+	attract_target = target
+	_attract_speed = 2.0
+
+
 func collect(by_player: bool = false) -> void:
 	if is_collected:
 		return
 	is_collected = true
 	collected_by_player = by_player
+	attract_target = null
+	CombatVFXScript.spawn_coin_sparkle(get_tree(), global_position, SPARKLE_COLORS.get(tier, Color(1.0, 0.85, 0.35)))
 	if _popup_label:
 		_popup_label.visible = true
 	collected.emit(coin_value, self)
