@@ -1,0 +1,63 @@
+[gd_resource type="ShaderMaterial" format=3 uid="uid://djrjk3ibneeaj"]
+
+[ext_resource type="Shader" uid="uid://cjrs7fqcbseb1" path="res://shaders/toon_water.gdshader" id="1_water"]
+
+[sub_resource type="FastNoiseLite" id="FastNoiseLite_edge"]
+noise_type = 2
+seed = 42
+frequency = 0.035
+fractal_octaves = 3
+
+[sub_resource type="NoiseTexture2D" id="NoiseTexture2D_edge"]
+width = 256
+height = 256
+noise = SubResource("FastNoiseLite_edge")
+seamless = true
+
+[sub_resource type="FastNoiseLite" id="FastNoiseLite_nor1"]
+noise_type = 3
+seed = 101
+frequency = 0.025
+fractal_octaves = 4
+
+[sub_resource type="NoiseTexture2D" id="NoiseTexture2D_nor1"]
+width = 256
+height = 256
+noise = SubResource("FastNoiseLite_nor1")
+seamless = true
+as_normal_map = true
+bump_strength = 6.0
+
+[sub_resource type="FastNoiseLite" id="FastNoiseLite_nor2"]
+noise_type = 2
+seed = 202
+frequency = 0.03
+fractal_octaves = 3
+
+[sub_resource type="NoiseTexture2D" id="NoiseTexture2D_nor2"]
+width = 256
+height = 256
+noise = SubResource("FastNoiseLite_nor2")
+seamless = true
+as_normal_map = true
+bump_strength = 5.0
+
+[resource]
+render_priority = 1
+shader = ExtResource("1_water")
+shader_parameter/norRand1 = SubResource("NoiseTexture2D_nor1")
+shader_parameter/norRand2 = SubResource("NoiseTexture2D_nor2")
+shader_parameter/dir = Vector2(-0.2, 1)
+shader_parameter/alpha = 0.65
+shader_parameter/distScaler = 0.14
+shader_parameter/baseCol = Color(0.16, 0.64, 0.86, 1)
+shader_parameter/deepCol = Color(0.04, 0.24, 0.46, 1)
+shader_parameter/deepColOffset = 0.25
+shader_parameter/noiseScaler = 0.06
+shader_parameter/waveSpeedScaler = 0.35
+shader_parameter/vertexSpeedScaler = 0.45
+shader_parameter/fresnelColor = Color(0.58, 0.89, 0.99, 1)
+shader_parameter/edgeColor = Color(0.9, 0.98, 1, 1)
+shader_parameter/edgeThreshold = 0.065
+shader_parameter/edgeNoise = SubResource("NoiseTexture2D_edge")
+shader_parameter/windRippleDegScaler = 0.14
