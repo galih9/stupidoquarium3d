@@ -1031,7 +1031,6 @@ func get_mood_description() -> String:
 
 
 func get_display_label() -> String:
-	var v_idx := clampi(int(variant), 0, VARIANT_TITLES.size() - 1)
 	var s_idx := clampi(int(size_category), 0, SIZE_NAMES.size() - 1)
 	var hunger_str := "Fed"
 	if hunger_status == HungerStatus.HUNGRY:
@@ -1047,8 +1046,7 @@ func get_display_label() -> String:
 	var tier := get_coin_tier()
 	if tier >= 0:
 		coin_str = "Next %s coin in %.0fs" % [COIN_NAMES[tier], ceilf(maxf(0.0, coin_timer))]
-	return "%s Goldfish (%s) | %s | %s | %s | %s" % [
-		VARIANT_TITLES[v_idx],
+	return "%s Goldfish | %s | %s | %s | %s" % [
 		SIZE_NAMES[s_idx],
 		hunger_str,
 		get_mood_description(),
